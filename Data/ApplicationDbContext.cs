@@ -19,11 +19,14 @@ namespace UniversityPortal.API.Data
         public DbSet<Semester> Semesters { get; set; }
         public DbSet<ProgramSessionSemester> ProgramSessionSemesters { get; set; }
         public DbSet<TeacherAssignment> TeacherAssignments { get; set; }
+        public DbSet<Room> Rooms { get; set; }
+        public DbSet<TimeSlot> TimeSlots { get; set; }
 
         // 👇 NEW DbSets 👇
         public DbSet<Student> Students { get; set; }
         public DbSet<Section> Sections { get; set; }
         public DbSet<StudentRegistration> StudentRegistrations { get; set; }
+        public DbSet<Timetable> Timetables { get; set; }
 
         protected override void OnModelCreating(ModelBuilder modelBuilder)
         {
@@ -265,6 +268,12 @@ namespace UniversityPortal.API.Data
                 .HasOne(ta => ta.ProgramCourse)
                 .WithMany()
                 .HasForeignKey(ta => ta.ProgramCourseId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            modelBuilder.Entity<Room>()
+                .HasOne(r => r.Department)
+                .WithMany()
+                .HasForeignKey(r => r.DepartmentId)
                 .OnDelete(DeleteBehavior.Cascade);
         }
     }

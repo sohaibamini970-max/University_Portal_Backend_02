@@ -1,8 +1,9 @@
 ﻿using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using System.Security.Claims;
+using UniversityPortal.API.Authorization;
 using UniversityPortal.API.Data;
 using UniversityPortal.API.Models;
-using UniversityPortal.API.Authorization;
 
 namespace UniversityPortal.API.Controllers
 {
@@ -19,15 +20,21 @@ namespace UniversityPortal.API.Controllers
 
         // GET: api/programs
         [HttpGet]
-        public async Task<IActionResult> GetAll([FromQuery] long? departmentId)
+        [RoleRequirementFilter("superadmin,systemadmin,department_admin")]
+        public async Task<IActionResult> GetAll()
         {
-            // 👇 Use DegreeProgram here
-            var query = _context.Programs.Include(p => p.Department).AsQueryable();
+            var userRole = User.FindFirst(ClaimTypes.Role)?.Value;
+            var deptIdStr = User.FindFirst("departmentId")?.Value;
 
-            if (departmentId.HasValue)
-                query = query.Where(p => p.DepartmentId == departmentId.Value);
+            var query = _context.Programs.AsQueryable();
 
-            var programs = await query.OrderBy(p => p.Name).ToListAsync();
+            // 👇 Filter by department if the requester is a department_admin
+            if (userRole == "department_admin" && long.TryParse(deptIdStr, out long deptId))
+            {
+                query = query.Where(p => p.DepartmentId == deptId);
+            }
+
+            var programs = await query.ToListAsync();
             return Ok(programs);
         }
 
