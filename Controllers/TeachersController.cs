@@ -312,6 +312,269 @@ namespace UniversityPortal.API.Controllers
             return Ok(courses);
         }
 
+        // ===================== ADMIN TEACHER MANAGEMENT =====================
+
+        public class AdminTeacherRequest
+        {
+            public string FullName { get; set; } = string.Empty;
+            public string? Phone { get; set; }
+            public string EmployeeId { get; set; } = string.Empty;
+            public string Designation { get; set; } = string.Empty;
+            public string Qualification { get; set; } = string.Empty;
+            public long DepartmentId { get; set; }
+            public bool IsHod { get; set; }
+            public bool IsChairman { get; set; }
+            public bool IsDean { get; set; }
+        }
+
+        public class TeacherRow
+        {
+            public Guid Id { get; set; }
+            public Guid ProfileId { get; set; }
+            public string FullName { get; set; } = string.Empty;
+            public string Email { get; set; } = string.Empty;
+            public string? Phone { get; set; }
+            public string EmployeeId { get; set; } = string.Empty;
+            public string Designation { get; set; } = string.Empty;
+            public string Qualification { get; set; } = string.Empty;
+            public long? DepartmentId { get; set; }
+            public string? DepartmentName { get; set; }
+            public bool IsHod { get; set; }
+            public bool IsChairman { get; set; }
+            public bool IsDean { get; set; }
+            public bool IsActive { get; set; }
+        }
+
+        private static readonly System.Linq.Expressions.Expression<Func<Teacher, TeacherRow>> RowSelector =
+            t => new TeacherRow
+            {
+                Id = t.Id,
+                ProfileId = t.ProfileId,
+                FullName = t.Profile.FullName,
+                Email = t.Profile.Email,
+                Phone = t.Profile.Phone,
+                EmployeeId = t.EmployeeId,
+                Designation = t.Designation,
+                Qualification = t.Qualification,
+                DepartmentId = t.DepartmentId,
+                DepartmentName = t.Department != null ? t.Department.Name : null,
+                IsHod = t.IsHod,
+                IsChairman = t.IsChairman,
+                IsDean = t.IsDean,
+                IsActive = t.Profile.IsActive
+            };
+
+        private async Task<Profile?> GetCallerProfileAsync()
+        {
+            var idStr = User.FindFirst(ClaimTypes.NameIdentifier)?.Value ?? User.FindFirst("sub")?.Value;
+            if (!Guid.TryParse(idStr, out var callerId)) return null;
+            return await _context.Profiles.AsNoTracking().FirstOrDefaultAsync(p => p.Id == callerId);
+        }
+
+        private static bool IsDepartmentAdmin(Profile caller) => caller.Role.ToString() == "department_admin";
+
+        private Supabase.Gotrue.AdminClient CreateAdminClient(IConfiguration config)
+        {
+            var serviceRoleKey = config["Supabase:ServiceRoleKey"];
+            var supabaseUrl = config["Supabase:Url"];
+
+            return new Supabase.Gotrue.AdminClient(serviceRoleKey, new ClientOptions
+            {
+                Url = $"{supabaseUrl}/auth/v1",
+                Headers = new Dictionary<string, string> { { "apikey", serviceRoleKey } }
+            });
+        }
+
+        // GET: api/teachers/admin?page=1&pageSize=10&search=smith
+        [HttpGet("admin")]
+        [RoleRequirementFilter("superadmin,systemadmin,department_admin")]
+        public async Task<IActionResult> GetTeachersPaged(
+            [FromQuery] int page = 1,
+            [FromQuery] int pageSize = 10,
+            [FromQuery] string? search = null)
+        {
+            var caller = await GetCallerProfileAsync();
+            if (caller == null) return Unauthorized();
+
+            page = Math.Max(1, page);
+            pageSize = Math.Clamp(pageSize, 1, 100);
+
+            var query = _context.Teachers.AsNoTracking().AsQueryable();
+
+            if (IsDepartmentAdmin(caller))
+                query = query.Where(t => t.DepartmentId == caller.DepartmentId);
+
+            if (!string.IsNullOrWhiteSpace(search))
+            {
+                var term = search.Trim().ToLower();
+                query = query.Where(t =>
+                    t.Profile.FullName.ToLower().Contains(term) ||
+                    t.Profile.Email.ToLower().Contains(term) ||
+                    t.EmployeeId.ToLower().Contains(term));
+            }
+
+            var total = await query.CountAsync();
+
+            var items = await query
+                .OrderBy(t => t.Profile.FullName)
+                .Skip((page - 1) * pageSize)
+                .Take(pageSize)
+                .Select(RowSelector)
+                .ToListAsync();
+
+            return Ok(new
+            {
+                items,
+                total,
+                page,
+                pageSize,
+                totalPages = (int)Math.Ceiling(total / (double)pageSize)
+            });
+        }
+
+        // GET: api/teachers/admin/{id}
+        [HttpGet("admin/{id:guid}")]
+        [RoleRequirementFilter("superadmin,systemadmin,department_admin")]
+        public async Task<IActionResult> GetTeacherDetail(Guid id)
+        {
+            var caller = await GetCallerProfileAsync();
+            if (caller == null) return Unauthorized();
+
+            var teacher = await _context.Teachers
+                .AsNoTracking()
+                .Where(t => t.Id == id)
+                .Select(RowSelector)
+                .FirstOrDefaultAsync();
+
+            if (teacher == null) return NotFound(new { message = "Teacher not found." });
+
+            if (IsDepartmentAdmin(caller) && teacher.DepartmentId != caller.DepartmentId)
+                return StatusCode(403, new { message = "You can only view teachers in your own department." });
+
+            var assignments = await _context.TeacherAssignments
+                .AsNoTracking()
+                .Where(ta => ta.TeacherId == id)
+                .Select(ta => new
+                {
+                    code = ta.ProgramCourse.Course.Code,
+                    name = ta.ProgramCourse.Course.Name,
+                    program = ta.ProgramCourse.Program.Name,
+                    batch = ta.ProgramCourse.Batch.Name,
+                    semester = ta.ProgramCourse.Semester.Name,
+                    section = ta.SectionName
+                })
+                .ToListAsync();
+
+            return Ok(new { teacher, assignments });
+        }
+
+        // PUT: api/teachers/admin/{id}
+        [HttpPut("admin/{id:guid}")]
+        [RoleRequirementFilter("superadmin,systemadmin,department_admin")]
+        public async Task<IActionResult> UpdateTeacherAdmin(Guid id, [FromBody] AdminTeacherRequest request)
+        {
+            var caller = await GetCallerProfileAsync();
+            if (caller == null) return Unauthorized();
+
+            var teacher = await _context.Teachers
+                .Include(t => t.Profile)
+                .FirstOrDefaultAsync(t => t.Id == id);
+
+            if (teacher == null) return NotFound(new { message = "Teacher not found." });
+
+            var isDeptAdmin = IsDepartmentAdmin(caller);
+            if (isDeptAdmin && teacher.DepartmentId != caller.DepartmentId)
+                return StatusCode(403, new { message = "You can only edit teachers in your own department." });
+
+            if (string.IsNullOrWhiteSpace(request.FullName))
+                return BadRequest(new { message = "Full name is required." });
+
+            if (string.IsNullOrWhiteSpace(request.EmployeeId))
+                return BadRequest(new { message = "Employee ID is required." });
+
+            var employeeId = request.EmployeeId.Trim();
+            var duplicate = await _context.Teachers
+                .AnyAsync(t => t.EmployeeId == employeeId && t.Id != id);
+            if (duplicate)
+                return BadRequest(new { message = $"Employee ID '{employeeId}' is already used by another teacher." });
+
+            // Department admins can't move teachers out of their department
+            if (!isDeptAdmin)
+            {
+                if (request.DepartmentId <= 0)
+                    return BadRequest(new { message = "A valid department is required." });
+
+                teacher.DepartmentId = request.DepartmentId;
+            }
+
+            teacher.Profile.FullName = request.FullName.Trim();
+            teacher.Profile.Phone = string.IsNullOrWhiteSpace(request.Phone) ? null : request.Phone.Trim();
+            teacher.Profile.UpdatedAt = DateTime.UtcNow;
+
+            teacher.EmployeeId = employeeId;
+            teacher.Designation = request.Designation?.Trim() ?? string.Empty;
+            teacher.Qualification = request.Qualification?.Trim() ?? string.Empty;
+            teacher.IsHod = request.IsHod;
+            teacher.IsChairman = request.IsChairman;
+            teacher.IsDean = request.IsDean;
+
+            await _context.SaveChangesAsync();
+            return Ok(new { message = "Teacher updated successfully." });
+        }
+
+        // DELETE: api/teachers/admin/{id}
+        [HttpDelete("admin/{id:guid}")]
+        [RoleRequirementFilter("superadmin,systemadmin")]
+        public async Task<IActionResult> DeleteTeacherAdmin(Guid id, [FromServices] IConfiguration config)
+        {
+            var teacher = await _context.Teachers.FirstOrDefaultAsync(t => t.Id == id);
+            if (teacher == null) return NotFound(new { message = "Teacher not found." });
+
+            // teacher_assignments has no cascade, and attendance and timetables hang off it.
+            // Block the delete rather than silently wiping academic records.
+            var hasAssignments = await _context.TeacherAssignments.AnyAsync(ta => ta.TeacherId == id);
+            if (hasAssignments)
+                return Conflict(new { message = "This teacher still has course assignments. Remove them before deleting." });
+
+            var profileId = teacher.ProfileId;
+
+            try
+            {
+                await using var tx = await _context.Database.BeginTransactionAsync();
+
+                _context.Teachers.Remove(teacher);
+                await _context.SaveChangesAsync();
+
+                var profile = await _context.Profiles.FindAsync(profileId);
+                if (profile != null)
+                {
+                    _context.Profiles.Remove(profile);
+                    await _context.SaveChangesAsync();
+                }
+
+                await tx.CommitAsync();
+            }
+            catch (Exception ex)
+            {
+                var message = ex.InnerException?.Message ?? ex.Message;
+                Console.WriteLine($"[DELETE TEACHER ERROR]: {message}");
+                return StatusCode(500, new { message = "Failed to delete teacher. If this person is a department head or admin, reassign that role first.", details = message });
+            }
+
+            // Login account removal. A failure here shouldn't undo the DB delete, so only log it.
+            try
+            {
+                var adminClient = CreateAdminClient(config);
+                await adminClient.DeleteUser(profileId.ToString());
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[DELETE TEACHER AUTH WARNING]: {ex.Message}");
+            }
+
+            return Ok(new { message = "Teacher deleted successfully." });
+        }
+
 
 
     }

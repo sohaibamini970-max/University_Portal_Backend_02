@@ -31,6 +31,7 @@ namespace UniversityPortal.API.Data
         public DbSet<AcademicCalendar> AcademicCalendars { get; set; }
 
         public DbSet<CalendarSlot> CalendarSlots { get; set; }
+        public DbSet<Admin> Admins => Set<Admin>();
 
         protected override void OnModelCreating(ModelBuilder modelBuilder)
         {
@@ -57,6 +58,35 @@ namespace UniversityPortal.API.Data
             modelBuilder.Entity<Department>()
                 .Property(d => d.Type)
                 .HasColumnType("department_type");
+
+
+            modelBuilder.Entity<Admin>(e =>
+            {
+                e.ToTable("admins");
+                e.HasKey(a => a.Id);
+
+                e.Property(a => a.Id).HasColumnName("id");
+                e.Property(a => a.ProfileId).HasColumnName("profile_id");
+                e.Property(a => a.DepartmentId).HasColumnName("department_id");
+                e.Property(a => a.EmployeeId).HasColumnName("employee_id");
+                e.Property(a => a.Designation).HasColumnName("designation");
+                e.Property(a => a.CreatedBy).HasColumnName("created_by");
+                e.Property(a => a.CreatedAt).HasColumnName("created_at");
+                e.Property(a => a.UpdatedAt).HasColumnName("updated_at");
+
+                e.HasIndex(a => a.ProfileId).IsUnique();
+                e.HasIndex(a => a.EmployeeId).IsUnique();
+
+                e.HasOne(a => a.Profile)
+                 .WithOne()
+                 .HasForeignKey<Admin>(a => a.ProfileId)
+                 .OnDelete(DeleteBehavior.Cascade);
+
+                e.HasOne(a => a.Department)
+                 .WithMany()
+                 .HasForeignKey(a => a.DepartmentId)
+                 .OnDelete(DeleteBehavior.SetNull);
+            });
 
             // ==========================================
             // 3. PROFILE & DEPARTMENT RELATIONSHIPS

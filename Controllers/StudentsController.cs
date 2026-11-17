@@ -429,5 +429,233 @@ namespace UniversityPortal.API.Controllers
 
             return Ok(schedule);
         }
+
+        // ===================== ADMIN STUDENT MANAGEMENT =====================
+
+        public class UpdateStudentRequest
+        {
+            public string FullName { get; set; } = string.Empty;
+            public string FatherName { get; set; } = string.Empty;
+            public string? Phone { get; set; }
+            public string Section { get; set; } = string.Empty;
+        }
+
+        private Supabase.Gotrue.AdminClient CreateAdminClient(IConfiguration config)
+        {
+            var serviceRoleKey = config["Supabase:ServiceRoleKey"];
+            var supabaseUrl = config["Supabase:Url"];
+
+            return new Supabase.Gotrue.AdminClient(serviceRoleKey, new ClientOptions
+            {
+                Url = $"{supabaseUrl}/auth/v1",
+                Headers = new Dictionary<string, string> { { "apikey", serviceRoleKey } }
+            });
+        }
+
+        // GET: api/students/admin?page=1&pageSize=10&search=ali
+        [HttpGet("admin")]
+        [RoleRequirementFilter("superadmin,systemadmin,department_admin")]
+        public async Task<IActionResult> GetStudentsPaged(
+            [FromQuery] int page = 1,
+            [FromQuery] int pageSize = 10,
+            [FromQuery] string? search = null)
+        {
+            page = Math.Max(1, page);
+            pageSize = Math.Clamp(pageSize, 1, 100);
+
+            var query = _context.Students.AsNoTracking().AsQueryable();
+
+            if (!string.IsNullOrWhiteSpace(search))
+            {
+                var term = search.Trim().ToLower();
+                query = query.Where(s =>
+                    s.Profile.FullName.ToLower().Contains(term) ||
+                    (s.Profile.RollNo != null && s.Profile.RollNo.ToLower().Contains(term)) ||
+                    s.Profile.Email.ToLower().Contains(term));
+            }
+
+            var total = await query.CountAsync();
+
+            var items = await query
+                .OrderBy(s => s.Profile.FullName)
+                .Skip((page - 1) * pageSize)
+                .Take(pageSize)
+                .Select(s => new
+                {
+                    id = s.Id,
+                    profileId = s.ProfileId,
+                    fullName = s.Profile.FullName,
+                    rollNo = s.Profile.RollNo,
+                    email = s.Profile.Email,
+                    phone = s.Profile.Phone,
+                    fatherName = s.FatherName,
+                    section = s.Section,
+                    isActive = s.IsActive,
+                    programName = s.Program.Name,
+                    programCode = s.Program.Code,
+                    batchName = s.Batch.Name,
+                    departmentName = s.Department.Name
+                })
+                .ToListAsync();
+
+            return Ok(new
+            {
+                items,
+                total,
+                page,
+                pageSize,
+                totalPages = (int)Math.Ceiling(total / (double)pageSize)
+            });
+        }
+
+        // GET: api/students/admin/{id}
+        [HttpGet("admin/{id:guid}")]
+        [RoleRequirementFilter("superadmin,systemadmin,department_admin")]
+        public async Task<IActionResult> GetStudentDetail(Guid id)
+        {
+            var student = await _context.Students
+                .AsNoTracking()
+                .Where(s => s.Id == id)
+                .Select(s => new
+                {
+                    id = s.Id,
+                    profileId = s.ProfileId,
+                    fullName = s.Profile.FullName,
+                    rollNo = s.Profile.RollNo,
+                    email = s.Profile.Email,
+                    phone = s.Profile.Phone,
+                    fatherName = s.FatherName,
+                    section = s.Section,
+                    isActive = s.IsActive,
+                    programName = s.Program.Name,
+                    programCode = s.Program.Code,
+                    batchName = s.Batch.Name,
+                    departmentName = s.Department.Name
+                })
+                .FirstOrDefaultAsync();
+
+            if (student == null) return NotFound(new { message = "Student not found." });
+
+            var registeredCourses = await _context.StudentRegistrations
+                .AsNoTracking()
+                .Where(r => r.StudentProfileId == student.profileId)
+                .Select(r => new
+                {
+                    code = r.ProgramCourse.Course.Code,
+                    name = r.ProgramCourse.Course.Name,
+                    creditHours = r.ProgramCourse.Course.CreditHours,
+                    section = r.Section.Name
+                })
+                .ToListAsync();
+
+            return Ok(new { student, registeredCourses });
+        }
+
+        // PUT: api/students/admin/{id}
+        [HttpPut("admin/{id:guid}")]
+        [RoleRequirementFilter("superadmin,systemadmin,department_admin")]
+        public async Task<IActionResult> UpdateStudent(Guid id, [FromBody] UpdateStudentRequest request)
+        {
+            var student = await _context.Students
+                .Include(s => s.Profile)
+                .FirstOrDefaultAsync(s => s.Id == id);
+
+            if (student == null) return NotFound(new { message = "Student not found." });
+
+            if (string.IsNullOrWhiteSpace(request.FullName))
+                return BadRequest(new { message = "Full name is required." });
+
+            var newSection = request.Section?.Trim() ?? string.Empty;
+            if (string.IsNullOrEmpty(newSection))
+                return BadRequest(new { message = "Section is required." });
+
+            student.Profile.FullName = request.FullName.Trim();
+            student.Profile.Phone = string.IsNullOrWhiteSpace(request.Phone) ? null : request.Phone.Trim();
+            student.Profile.UpdatedAt = DateTime.UtcNow;
+            student.FatherName = request.FatherName?.Trim() ?? string.Empty;
+
+            // If the section changed, move the registrations to the matching section record
+            if (!string.Equals(student.Section, newSection, StringComparison.Ordinal))
+            {
+                var registrations = await _context.StudentRegistrations
+                    .Include(r => r.Section)
+                    .Where(r => r.StudentProfileId == student.ProfileId)
+                    .ToListAsync();
+
+                foreach (var reg in registrations)
+                {
+                    var target = await _context.Sections.FirstOrDefaultAsync(s =>
+                        s.ProgramId == student.ProgramId &&
+                        s.BatchId == student.BatchId &&
+                        s.SemesterId == reg.Section.SemesterId &&
+                        s.Name == newSection);
+
+                    if (target == null)
+                        return BadRequest(new { message = $"Section '{newSection}' is not configured for this Program and Batch." });
+
+                    reg.SectionId = target.Id;
+                }
+
+                student.Section = newSection;
+            }
+
+            await _context.SaveChangesAsync();
+            return Ok(new { message = "Student updated successfully." });
+        }
+
+        // DELETE: api/students/admin/{id}
+        [HttpDelete("admin/{id:guid}")]
+        [RoleRequirementFilter("superadmin,systemadmin")]
+        public async Task<IActionResult> DeleteStudent(Guid id, [FromServices] IConfiguration config)
+        {
+            var student = await _context.Students.FirstOrDefaultAsync(s => s.Id == id);
+            if (student == null) return NotFound(new { message = "Student not found." });
+
+            var profileId = student.ProfileId;
+
+            try
+            {
+                await using var tx = await _context.Database.BeginTransactionAsync();
+
+                await _context.Attendances
+                    .Where(a => a.StudentProfileId == profileId)
+                    .ExecuteDeleteAsync();
+
+                await _context.StudentRegistrations
+                    .Where(r => r.StudentProfileId == profileId)
+                    .ExecuteDeleteAsync();
+
+                _context.Students.Remove(student);
+                await _context.SaveChangesAsync();
+
+                var profile = await _context.Profiles.FindAsync(profileId);
+                if (profile != null)
+                {
+                    _context.Profiles.Remove(profile);
+                    await _context.SaveChangesAsync();
+                }
+
+                await tx.CommitAsync();
+            }
+            catch (Exception ex)
+            {
+                var message = ex.InnerException?.Message ?? ex.Message;
+                Console.WriteLine($"[DELETE STUDENT ERROR]: {message}");
+                return StatusCode(500, new { message = "Failed to delete student.", details = message });
+            }
+
+            // Remove the login account. Failure here shouldn't undo the DB delete, so only log it.
+            try
+            {
+                var adminClient = CreateAdminClient(config);
+                await adminClient.DeleteUser(profileId.ToString());
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[DELETE AUTH USER WARNING]: {ex.Message}");
+            }
+
+            return Ok(new { message = "Student deleted successfully." });
+        }
     }
 }

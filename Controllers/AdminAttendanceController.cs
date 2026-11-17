@@ -109,34 +109,44 @@ namespace UniversityPortal.API.Controllers
         public async Task<IActionResult> GetRecords([FromQuery] long programCourseId, [FromQuery] int? week)
         {
             var query = _context.Attendances
-                .Include(a => a.StudentProfile)
-                .Include(a => a.TeacherAssignment)
                 .Where(a => a.TeacherAssignment.ProgramCourseId == programCourseId);
 
             if (week.HasValue)
             {
-                // Filter by week
                 var targetDates = await _context.AcademicCalendars
-                    .Where(c => c.TeacherAssignment.ProgramCourseId == programCourseId && c.WeekNumber == week.Value)
+                    .Where(c => c.TeacherAssignment.ProgramCourseId == programCourseId
+                             && c.WeekNumber == week.Value)
                     .Select(c => c.Date)
+                    .Distinct()
                     .ToListAsync();
 
                 query = query.Where(a => targetDates.Contains(a.Date));
             }
 
-            var records = await query
+            var rows = await query
+                .OrderByDescending(a => a.Date)
                 .Select(a => new
                 {
-                    id = a.Id,
-                    studentName = a.StudentProfile.FullName,
-                    rollNo = a.StudentProfile.RollNo,
-                    section = a.TeacherAssignment.SectionName,
-                    date = a.Date.ToString("yyyy-MM-dd"),
-                    status = a.Status,
-                    remarks = a.Remarks
+                    a.Id,
+                    StudentName = a.StudentProfile.FullName,
+                    RollNo = a.StudentProfile.RollNo,
+                    Section = a.TeacherAssignment.SectionName,
+                    a.Date,
+                    a.Status,
+                    a.Remarks
                 })
-                .OrderByDescending(a => a.date)
                 .ToListAsync();
+
+            var records = rows.Select(r => new
+            {
+                id = r.Id,
+                studentName = r.StudentName,
+                rollNo = r.RollNo,
+                section = r.Section,
+                date = r.Date.ToString("yyyy-MM-dd"),
+                status = r.Status,
+                remarks = r.Remarks
+            });
 
             return Ok(records);
         }
