@@ -200,5 +200,41 @@ namespace UniversityPortal.API.Controllers
 
             return Ok(schedule);
         }
+        // Add this to TimetablesController.cs
+        [HttpGet("teacher-schedule-by-date")]
+        [RoleRequirementFilter("teacher")]
+        public async Task<IActionResult> GetTeacherScheduleByDate([FromQuery] string date)
+        {
+            var userIdStr = User.FindFirst(ClaimTypes.NameIdentifier)?.Value ?? User.FindFirst("sub")?.Value;
+            if (!Guid.TryParse(userIdStr, out Guid userId)) return Unauthorized();
+
+            var teacher = await _context.Teachers.FirstOrDefaultAsync(t => t.ProfileId == userId);
+            if (teacher == null) return NotFound();
+
+            var parsedDate = DateTime.Parse(date);
+            var dayName = parsedDate.DayOfWeek.ToString();
+
+            // Fetch classes for this teacher on this specific day of the week
+            var schedule = await _context.Timetables
+                .Include(t => t.TeacherAssignment).ThenInclude(ta => ta.ProgramCourse).ThenInclude(pc => pc.Course)
+                .Include(t => t.TeacherAssignment).ThenInclude(ta => ta.ProgramCourse).ThenInclude(pc => pc.Program)
+                .Include(t => t.TeacherAssignment).ThenInclude(ta => ta.ProgramCourse).ThenInclude(pc => pc.Batch)
+                .Include(t => t.Room)
+                .Where(t => t.TeacherAssignment.TeacherId == teacher.Id && t.DayOfWeek == dayName)
+                .Select(t => new
+                {
+                    teacherAssignmentId = t.TeacherAssignmentId,
+                    courseCode = t.TeacherAssignment.ProgramCourse.Course.Code,
+                    courseName = t.TeacherAssignment.ProgramCourse.Course.Name,
+                    section = t.TeacherAssignment.SectionName,
+                    batchName = t.TeacherAssignment.ProgramCourse.Batch.Name,
+                    roomName = t.Room.RoomNumber,
+                    timeSlot = t.TimeSlot
+                })
+                .OrderBy(t => t.timeSlot)
+                .ToListAsync();
+
+            return Ok(schedule);
+        }
     }
 }

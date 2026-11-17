@@ -35,7 +35,7 @@ namespace UniversityPortal.API.Controllers
         {
             var sections = await _context.Sections
                 .Where(s => s.ProgramId == programId && s.BatchId == batchId && s.SemesterId == semesterId)
-                .Select(s => new { name = s.Name, maxSeats = s.MaxSeats, isActive = s.IsActive })
+                .Select(s => new { id = s.Id, name = s.Name, maxSeats = s.MaxSeats, isActive = s.IsActive })
                 .ToListAsync();
 
             return Ok(sections);

@@ -29,15 +29,19 @@ namespace UniversityPortal.API.Authorization
                 return;
             }
 
-            // Check Token Roles (Department Admin custom token)
+            // 1. Get the roles from the token
             var tokenRoles = user.FindAll(ClaimTypes.Role).Select(c => c.Value.ToLower()).ToList();
-            if (tokenRoles.Contains("department_admin"))
+
+            // 2. If it's a custom token (Department Admin, Teacher), it will have the role directly
+            if (tokenRoles.Any(r => _allowedRoles.Contains(r)))
             {
-                return; // Valid custom token
+                return; // Authorized
             }
 
-            // Check DB Roles (Supabase token)
-            var userIdString = user.FindFirst(ClaimTypes.NameIdentifier)?.Value ?? user.FindFirst("sub")?.Value;
+            // 3. If it's a Supabase token, the role might be 'authenticated'. 
+            // We must check the database to find their REAL role.
+            var userIdString = user.FindFirst(ClaimTypes.NameIdentifier)?.Value
+                            ?? user.FindFirst("sub")?.Value;
 
             if (string.IsNullOrEmpty(userIdString) || !Guid.TryParse(userIdString, out Guid userId))
             {
@@ -55,11 +59,16 @@ namespace UniversityPortal.API.Authorization
             }
 
             var dbRole = profile.Role.ToString().ToLower();
+
+            // 4. Check if the database role is allowed
             if (!_allowedRoles.Contains(dbRole))
             {
+                Console.WriteLine($"[AUTH FAILED] DB Role: {dbRole}, Allowed: {string.Join(",", _allowedRoles)}");
                 context.Result = new ForbidResult();
                 return;
             }
+
+            Console.WriteLine($"[AUTH PASSED] DB Role: {dbRole} is allowed.");
         }
     }
 }

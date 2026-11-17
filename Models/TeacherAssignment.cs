@@ -28,5 +28,8 @@ namespace UniversityPortal.API.Models
 
         [ForeignKey("ProgramCourseId")]
         public ProgramCourse? ProgramCourse { get; set; }
+
+        [Column("is_attendance_locked")]
+        public bool IsAttendanceLocked { get; set; } = false;
     }
 }

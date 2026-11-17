@@ -204,16 +204,14 @@ namespace UniversityPortal.API.Controllers
             }
             catch (Exception ex)
             {
-                var innerEx = ex.InnerException;
-                while (innerEx != null)
-                {
-                    Console.WriteLine("========================================");
-                    Console.WriteLine($"DATABASE ERROR: {innerEx.Message}");
-                    Console.WriteLine("========================================");
-                    innerEx = innerEx.InnerException;
-                }
+                // Unwrap the inner exception to get the Postgres error
+                var errorMessage = ex.InnerException != null ? ex.InnerException.Message : ex.Message;
 
-                return StatusCode(500, new { message = "Database error", details = ex.InnerException?.Message ?? ex.Message });
+                // Print to terminal
+                Console.WriteLine($"[REGISTRATION ERROR]: {errorMessage}");
+
+                // Return to frontend so you can see it in the browser alert
+                return StatusCode(500, new { message = "Database error", details = errorMessage });
             }
         }
 
@@ -332,7 +330,6 @@ namespace UniversityPortal.API.Controllers
             return Ok(new { message = "Status updated successfully." });
         }
 
-        // PUT: api/students/{profileId}/reset-password
         [HttpPut("{profileId}/reset-password")]
         [RoleRequirementFilter("superadmin,systemadmin")]
         public async Task<IActionResult> ResetPassword(Guid profileId, [FromBody] ResetPasswordRequest request, [FromServices] IConfiguration config)
@@ -351,17 +348,86 @@ namespace UniversityPortal.API.Controllers
                     Headers = new Dictionary<string, string> { { "apikey", serviceRoleKey } }
                 });
 
-                var attributes = new Supabase.Gotrue.AdminUserAttributes { Password = request.Password };
-                await adminClient.UpdateUserById(profileId.ToString(), attributes);
+                try
+                {
+                    // First, try to update the user
+                    var attributes = new Supabase.Gotrue.AdminUserAttributes { Password = request.Password };
+                    await adminClient.UpdateUserById(profileId.ToString(), attributes);
+                }
+                catch (Exception ex) when (ex.Message.Contains("User not found"))
+                {
+                    // 👇 If the user doesn't exist, CREATE them in Supabase Auth
+                    var authUser = await adminClient.CreateUser(new Supabase.Gotrue.AdminUserAttributes
+                    {
+                        Email = profile.Email,
+                        Password = request.Password,
+                        EmailConfirm = true,
+                        UserMetadata = new Dictionary<string, object>
+                {
+                    { "full_name", profile.FullName },
+                    { "role", "student" }
+                }
+                    });
+
+                    if (authUser == null)
+                        return BadRequest(new { message = "Failed to create Auth user." });
+                }
 
                 return Ok(new { message = "Password updated successfully." });
             }
             catch (Exception ex)
             {
+                Console.WriteLine($"[RESET PASSWORD ERROR]: {ex.Message}");
                 return BadRequest(new { message = "Failed to update password.", details = ex.Message });
             }
         }
 
         public class ResetPasswordRequest { public string Password { get; set; } = string.Empty; }
+
+        // Inside StudentsController.cs
+
+        [HttpGet("my-timetable")]
+        [RoleRequirementFilter("student")]
+        public async Task<IActionResult> GetMyTimetable()
+        {
+            var userIdStr = User.FindFirst(ClaimTypes.NameIdentifier)?.Value ?? User.FindFirst("sub")?.Value;
+            if (!Guid.TryParse(userIdStr, out Guid userId)) return Unauthorized();
+
+            // 1. Get the student's registered section
+            var registration = await _context.StudentRegistrations
+                .Include(r => r.Section)
+                .FirstOrDefaultAsync(r => r.StudentProfileId == userId);
+
+            if (registration == null || registration.Section == null)
+                return Ok(new List<object>()); // Return empty if not registered
+
+            var sectionName = registration.Section.Name; // e.g., "A"
+            var programId = registration.Section.ProgramId;
+            var batchId = registration.Section.BatchId;
+            var semesterId = registration.Section.SemesterId;
+
+            // 2. Fetch the schedule for this section
+            var schedule = await _context.Timetables
+                .Include(t => t.Room)
+                .Include(t => t.TeacherAssignment).ThenInclude(ta => ta.Teacher).ThenInclude(tr => tr.Profile)
+                .Include(t => t.TeacherAssignment).ThenInclude(ta => ta.ProgramCourse).ThenInclude(pc => pc.Course)
+                .Where(t => t.TeacherAssignment.SectionName == sectionName &&
+                            t.TeacherAssignment.ProgramCourse.ProgramId == programId &&
+                            t.TeacherAssignment.ProgramCourse.BatchId == batchId &&
+                            t.TeacherAssignment.ProgramCourse.SemesterId == semesterId)
+                .Select(t => new
+                {
+                    id = t.Id,
+                    dayOfWeek = t.DayOfWeek,
+                    timeSlot = t.TimeSlot,
+                    roomName = t.Room.RoomNumber,
+                    courseCode = t.TeacherAssignment.ProgramCourse.Course.Code,
+                    courseName = t.TeacherAssignment.ProgramCourse.Course.Name,
+                    teacherName = t.TeacherAssignment.Teacher.Profile.FullName
+                })
+                .ToListAsync();
+
+            return Ok(schedule);
+        }
     }
 }

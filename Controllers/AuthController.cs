@@ -343,43 +343,39 @@ namespace UniversityPortal.API.Controllers
         {
             try
             {
-                // 1. Find the student by Roll Number
                 var profile = await _context.Profiles
-                    .Include(p => p.StudentRecord) // Make sure to include the Student record
+                    .Include(p => p.StudentRecord)
                     .FirstOrDefaultAsync(p => p.RollNo == request.RollNo);
 
                 if (profile == null || profile.Role != ProfileRole.student)
                     return Unauthorized(new { message = "Invalid Roll Number." });
 
-                // 2. Check if the portal is activated by the System Admin
                 if (profile.StudentRecord == null || !profile.StudentRecord.IsActive)
-                    return Unauthorized(new { message = "Your portal is inactive. Please contact the administration." });
+                    return Unauthorized(new { message = "Your portal is inactive." });
 
-                // 3. Authenticate with Supabase using the student's actual email
                 var session = await _supabase.Auth.SignIn(profile.Email, request.Password);
 
                 if (session?.User == null)
                     return Unauthorized(new { message = "Invalid password." });
 
-                // 4. Return the token and user data
+                // 👇 RETURN THE FULL USER OBJECT
                 return Ok(new
                 {
                     token = session.AccessToken,
-                    refreshToken = session.RefreshToken,
                     user = new
                     {
                         id = profile.Id,
                         email = profile.Email,
                         fullName = profile.FullName,
-                        rollNo = profile.RollNo,
-                        role = "student"
+                        role = "student", // Force the correct role for React
+                        rollNo = profile.RollNo
                     }
                 });
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Student login failed for {RollNo}", request.RollNo);
-                return BadRequest(new { message = "Invalid login credentials." });
+                Console.WriteLine($"[STUDENT LOGIN ERROR] {ex.Message}");
+                return BadRequest(new { message = "Login failed", details = ex.Message });
             }
         }
 

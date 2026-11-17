@@ -27,11 +27,14 @@ namespace UniversityPortal.API.Data
         public DbSet<Section> Sections { get; set; }
         public DbSet<StudentRegistration> StudentRegistrations { get; set; }
         public DbSet<Timetable> Timetables { get; set; }
+        public DbSet<Attendance> Attendances { get; set; }
+        public DbSet<AcademicCalendar> AcademicCalendars { get; set; }
+
+        public DbSet<CalendarSlot> CalendarSlots { get; set; }
 
         protected override void OnModelCreating(ModelBuilder modelBuilder)
         {
             base.OnModelCreating(modelBuilder);
-
             // ==========================================
             // 1. UNIQUE CONSTRAINTS
             // ==========================================
@@ -275,6 +278,40 @@ namespace UniversityPortal.API.Data
                 .WithMany()
                 .HasForeignKey(r => r.DepartmentId)
                 .OnDelete(DeleteBehavior.Cascade);
-        }
+
+            modelBuilder.Entity<Attendance>()
+              .HasOne(a => a.StudentProfile)
+              .WithMany()
+              .HasForeignKey(a => a.StudentProfileId)
+              .OnDelete(DeleteBehavior.Cascade);
+
+            modelBuilder.Entity<Attendance>()
+                .HasOne(a => a.TeacherAssignment)
+                .WithMany()
+                .HasForeignKey(a => a.TeacherAssignmentId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            // ✅ ADD THIS
+            modelBuilder.Entity<AcademicCalendar>()
+                .HasOne(c => c.TeacherAssignment)
+                .WithMany()
+                .HasForeignKey(c => c.TeacherAssignmentId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            // Add this with the other DbSets
+
+            // Inside OnModelCreating, add this at the bottom:
+            modelBuilder.Entity<CalendarSlot>()
+                .HasOne(cs => cs.AcademicCalendar)
+                .WithMany()
+                .HasForeignKey(cs => cs.AcademicCalendarId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            modelBuilder.Entity<CalendarSlot>()
+                .HasOne(cs => cs.TeacherAssignment)
+                .WithMany()
+                .HasForeignKey(cs => cs.TeacherAssignmentId)
+                .OnDelete(DeleteBehavior.Cascade);
+    }
     }
 }

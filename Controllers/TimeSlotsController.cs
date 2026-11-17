@@ -20,8 +20,9 @@ namespace UniversityPortal.API.Controllers
             public string EndTime { get; set; } = string.Empty;
         }
 
+        // 👇 ADD THIS GET ENDPOINT 👇
         [HttpGet]
-        [RoleRequirementFilter("department_admin,superadmin,systemadmin")]
+        [RoleRequirementFilter("department_admin,superadmin,systemadmin,student,teacher")]
         public async Task<IActionResult> GetSlots()
         {
             var userRole = User.FindFirst(ClaimTypes.Role)?.Value;
@@ -29,6 +30,8 @@ namespace UniversityPortal.API.Controllers
 
             var query = _context.TimeSlots.AsQueryable();
 
+            // If it's a department_admin, filter by their department.
+            // Students/Teachers/Admins will see all time slots (or we could filter by their department too).
             if (userRole == "department_admin" && long.TryParse(deptIdStr, out long deptId))
             {
                 query = query.Where(s => s.DepartmentId == deptId);
@@ -42,6 +45,7 @@ namespace UniversityPortal.API.Controllers
             return Ok(slots);
         }
 
+        // POST: api/time-slots
         [HttpPost]
         [RoleRequirementFilter("department_admin,superadmin,systemadmin")]
         public async Task<IActionResult> AddSlot([FromBody] TimeSlotRequest request)
@@ -49,7 +53,6 @@ namespace UniversityPortal.API.Controllers
             var deptIdStr = User.FindFirst("departmentId")?.Value;
             if (!long.TryParse(deptIdStr, out long deptId)) return Unauthorized();
 
-            // Check if slot already exists for this dept
             var exists = await _context.TimeSlots.AnyAsync(s =>
                 s.DepartmentId == deptId &&
                 s.StartTime == request.StartTime &&
@@ -70,6 +73,7 @@ namespace UniversityPortal.API.Controllers
             return Ok(new { message = "Slot added successfully." });
         }
 
+        // DELETE: api/time-slots/{id}
         [HttpDelete("{id}")]
         [RoleRequirementFilter("department_admin,superadmin,systemadmin")]
         public async Task<IActionResult> DeleteSlot(long id)
