@@ -17,9 +17,10 @@ namespace UniversityPortal.API.Controllers
         // GET: api/academic-calendar/configure?programId=1&batchId=1&semesterId=1&section=A
         [HttpGet("configure")]
         [RoleRequirementFilter("department_admin")]
-        public async Task<IActionResult> GetConfiguration([FromQuery] long programId, [FromQuery] long batchId, [FromQuery] long semesterId, [FromQuery] string section)
+        public async Task<IActionResult> GetConfiguration(
+    [FromQuery] long programId, [FromQuery] long batchId,
+    [FromQuery] long semesterId, [FromQuery] string section)
         {
-            // Fetch courses assigned to this section
             var courses = await _context.TeacherAssignments
                 .Include(ta => ta.ProgramCourse).ThenInclude(pc => pc.Course)
                 .Where(ta => ta.ProgramCourse.ProgramId == programId &&
@@ -32,12 +33,24 @@ namespace UniversityPortal.API.Controllers
                     courseCode = ta.ProgramCourse.Course.Code,
                     courseName = ta.ProgramCourse.Course.Name,
                     creditHours = ta.ProgramCourse.Course.CreditHours,
-                    // Get the days this course is scheduled on
+
+                    // 👇 Full slots (day + period)
+                    scheduleSlots = _context.Timetables
+                        .Where(t => t.TeacherAssignmentId == ta.Id)
+                        .OrderBy(t => t.DayOfWeek)
+                        .ThenBy(t => t.TimeSlot)
+                        .Select(t => new { dayOfWeek = t.DayOfWeek, timeSlot = t.TimeSlot })
+                        .ToList(),
+
+                    // 👇 Days only, for backward compatibility with current frontend
                     scheduleDays = _context.Timetables
                         .Where(t => t.TeacherAssignmentId == ta.Id)
                         .Select(t => t.DayOfWeek)
                         .Distinct()
-                        .ToList()
+                        .ToList(),
+
+                    // 👇 Total classes per week (counts back-to-back periods separately)
+                    classesPerWeek = _context.Timetables.Count(t => t.TeacherAssignmentId == ta.Id)
                 })
                 .ToListAsync();
 
@@ -56,65 +69,92 @@ namespace UniversityPortal.API.Controllers
         [RoleRequirementFilter("department_admin")]
         public async Task<IActionResult> GenerateDates([FromBody] GenerateRequest request)
         {
-            // Get the course details
             var assignment = await _context.TeacherAssignments
                 .Include(ta => ta.ProgramCourse).ThenInclude(pc => pc.Course)
                 .FirstOrDefaultAsync(ta => ta.Id == request.TeacherAssignmentId);
 
             if (assignment == null) return NotFound();
 
-            int totalClassesNeeded = assignment.ProgramCourse.Course.CreditHours * request.TotalWeeks;
-
-            // Get the timetable days for this course (e.g., Monday, Wednesday, Friday)
-            var scheduledDays = await _context.Timetables
+            // ✅ Pull the actual timetable rows — one per class/period.
+            //    Do NOT Distinct() on DayOfWeek, or back-to-back periods collapse.
+            var timetableSlots = await _context.Timetables
                 .Where(t => t.TeacherAssignmentId == request.TeacherAssignmentId)
-                .Select(t => t.DayOfWeek)
-                .Distinct()
+                .Select(t => new { t.DayOfWeek, t.TimeSlot })
+                .OrderBy(t => t.DayOfWeek)
+                .ThenBy(t => t.TimeSlot)
                 .ToListAsync();
 
-            if (scheduledDays.Count == 0) return BadRequest(new { message = "No timetable schedule found for this course." });
+            if (timetableSlots.Count == 0)
+                return BadRequest(new { message = "No timetable schedule found for this course." });
+
+            int classesPerWeek = timetableSlots.Count;   // 3 for your example
 
             // Remove existing dates for this course
-            var existing = await _context.AcademicCalendars.Where(c => c.TeacherAssignmentId == request.TeacherAssignmentId).ToListAsync();
+            var existing = await _context.AcademicCalendars
+                .Where(c => c.TeacherAssignmentId == request.TeacherAssignmentId)
+                .ToListAsync();
             _context.AcademicCalendars.RemoveRange(existing);
 
             var newDates = new List<AcademicCalendar>();
-            var currentDate = DateTime.SpecifyKind(request.StartDate.Date, DateTimeKind.Utc);
-            int classCount = 1;
-            int weekNum = 1;
 
-            // Loop until we generate the required number of classes
-            while (classCount <= totalClassesNeeded)
+            // Find the Monday of the week containing StartDate
+            var start = DateTime.SpecifyKind(request.StartDate.Date, DateTimeKind.Utc);
+            int daysToMonday = ((int)start.DayOfWeek + 6) % 7;   // Monday=0, Tue=1, ..., Sun=6
+            var firstMonday = start.AddDays(-daysToMonday);
+
+            // For each week, for each timetable slot, create exactly one academic_calendar row
+            for (int w = 0; w < request.TotalWeeks; w++)
             {
-                // Check if today is a scheduled day for this course
-                if (scheduledDays.Contains(currentDate.DayOfWeek.ToString()))
+                var weekStart = firstMonday.AddDays(7 * w);
+                int classIndexInWeek = 0;
+
+                foreach (var slot in timetableSlots)
                 {
+                    var date = ResolveDateForDay(weekStart, slot.DayOfWeek);
+
+                    // Skip slots that fall before the semester start date
+                    if (date < start) continue;
+
+                    classIndexInWeek++;
                     newDates.Add(new AcademicCalendar
                     {
                         TeacherAssignmentId = request.TeacherAssignmentId,
-                        WeekNumber = weekNum,
-                        ClassNumber = classCount,
-                        Date = currentDate,
-                        DayName = currentDate.DayOfWeek.ToString(),
+                        WeekNumber = w + 1,
+                        ClassNumber = classIndexInWeek,     // 1, 2, 3 within the week
+                        Date = DateTime.SpecifyKind(date, DateTimeKind.Utc),
+                        DayName = slot.DayOfWeek,
+                        TimeSlot = slot.TimeSlot,
+                        IsAttendanceAllowed = true,
                         CreatedAt = DateTime.UtcNow
                     });
-                    classCount++;
-                }
-
-                // Move to next day
-                currentDate = currentDate.AddDays(1);
-
-                // Increment week number when we hit Monday
-                if (currentDate.DayOfWeek == DayOfWeek.Monday && newDates.Count > 0)
-                {
-                    weekNum++;
                 }
             }
 
             _context.AcademicCalendars.AddRange(newDates);
             await _context.SaveChangesAsync();
 
-            return Ok(new { message = $"Generated {newDates.Count} dates across {weekNum} weeks." });
+            return Ok(new
+            {
+                message = $"Generated {newDates.Count} dates across {request.TotalWeeks} weeks.",
+                classesPerWeek,
+                weeks = request.TotalWeeks
+            });
+        }
+
+        private static DateTime ResolveDateForDay(DateTime weekMonday, string dayOfWeek)
+        {
+            // weekMonday is a Monday; find the offset for the requested day name
+            return dayOfWeek switch
+            {
+                "Monday" => weekMonday,
+                "Tuesday" => weekMonday.AddDays(1),
+                "Wednesday" => weekMonday.AddDays(2),
+                "Thursday" => weekMonday.AddDays(3),
+                "Friday" => weekMonday.AddDays(4),
+                "Saturday" => weekMonday.AddDays(5),
+                "Sunday" => weekMonday.AddDays(6),
+                _ => weekMonday
+            };
         }
 
         // GET: api/academic-calendar/course?teacherAssignmentId=1
@@ -131,7 +171,8 @@ namespace UniversityPortal.API.Controllers
                     weekNumber = c.WeekNumber,
                     classNumber = c.ClassNumber,
                     date = c.Date.ToString("yyyy-MM-dd"),
-                    dayName = c.DayName
+                    dayName = c.DayName,
+                    timeSlot = c.TimeSlot,
                 })
                 .ToListAsync();
 

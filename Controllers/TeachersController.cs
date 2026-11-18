@@ -573,10 +573,51 @@ namespace UniversityPortal.API.Controllers
             }
 
             return Ok(new { message = "Teacher deleted successfully." });
+        
         }
 
+        // PUT: api/teachers/admin/{id}/password
+        [HttpPut("admin/{id:guid}/password")]
+        [RoleRequirementFilter("superadmin,systemadmin")]
+        public async Task<IActionResult> UpdateTeacherPassword(
+            Guid id,
+            [FromBody] UpdateTeacherPasswordRequest request,
+            [FromServices] IConfiguration config)
+        {
+            if (string.IsNullOrWhiteSpace(request.NewPassword) || request.NewPassword.Length < 6)
+                return BadRequest(new { message = "Password must be at least 6 characters." });
 
+            var teacher = await _context.Teachers
+                .AsNoTracking()
+                .FirstOrDefaultAsync(t => t.Id == id);
 
+            if (teacher == null) return NotFound(new { message = "Teacher not found." });
+
+            try
+            {
+                var adminClient = CreateAdminClient(config);
+
+                // Supabase Admin API: update the user's password by their auth user id (== ProfileId)
+                await adminClient.UpdateUserById(
+                    teacher.ProfileId.ToString(),
+                    new Supabase.Gotrue.AdminUserAttributes
+                    {
+                        Password = request.NewPassword
+                    });
+
+                return Ok(new { message = "Password updated successfully." });
+            }
+            catch (Exception ex)
+            {
+                var message = ex.InnerException?.Message ?? ex.Message;
+                Console.WriteLine($"[UPDATE TEACHER PASSWORD ERROR]: {message}");
+                return BadRequest(new { message = "Failed to update password.", details = message });
+            }
+        }
+    }
+    public class UpdateTeacherPasswordRequest
+    {
+        public string NewPassword { get; set; } = string.Empty;
     }
 
     // Request Models

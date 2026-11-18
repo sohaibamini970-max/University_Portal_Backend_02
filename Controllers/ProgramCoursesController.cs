@@ -19,6 +19,7 @@ namespace UniversityPortal.API.Controllers
 
         // ==============================================================
         // GET: api/program-courses?batchId=&programId=&semesterId=&sessionId=
+        // Returns FULL entity rows (kept for any existing consumer).
         // ==============================================================
         [HttpGet]
         public async Task<IActionResult> GetAssignments(
@@ -49,7 +50,58 @@ namespace UniversityPortal.API.Controllers
         }
 
         // ==============================================================
-        // 👇 NEW ENDPOINT: GET: api/program-courses/filter 👇
+        // 👇 NEW: GET: api/program-courses/assignments
+        // Flat shape for the ManageCourses "Program Assignments" panel.
+        // Filter by programId and/or semesterId (the two dropdowns on the page).
+        // ==============================================================
+        [HttpGet("assignments")]
+        public async Task<IActionResult> GetAssignmentsFlat(
+            [FromQuery] long? programId,
+            [FromQuery] long? semesterId,
+            [FromQuery] long? batchId)
+        {
+            var query = _context.ProgramCourses
+                .Include(pc => pc.Course)
+                .Include(pc => pc.Program)
+                .Include(pc => pc.Batch)
+                .Include(pc => pc.Semester)
+                .AsQueryable();
+
+            if (programId.HasValue) query = query.Where(pc => pc.ProgramId == programId.Value);
+            if (semesterId.HasValue) query = query.Where(pc => pc.SemesterId == semesterId.Value);
+            if (batchId.HasValue) query = query.Where(pc => pc.BatchId == batchId.Value);
+
+            var rows = await query
+                .OrderBy(pc => pc.Program!.Code)
+                .ThenBy(pc => pc.SemesterId)
+                .ThenBy(pc => pc.Course!.Code)
+                .Select(pc => new
+                {
+                    id = pc.Id,
+                    courseId = pc.CourseId,
+                    courseCode = pc.Course != null ? pc.Course.Code : "N/A",
+                    courseName = pc.Course != null ? pc.Course.Name : "Unknown",
+                    programId = pc.ProgramId,
+                    programCode = pc.Program != null ? pc.Program.Code : null,
+                    programName = pc.Program != null ? pc.Program.Name : null,
+                    batchId = pc.BatchId,
+                    batchName = pc.Batch != null ? pc.Batch.Name : null,
+                    semesterId = pc.SemesterId,
+                    semesterName = pc.Semester != null ? pc.Semester.Name : null,
+                    sections = pc.Sections,
+                    enrolledCount = _context.StudentRegistrations
+                                        .Count(r => r.ProgramCourseId == pc.Id),
+                    hasTeacher = _context.TeacherAssignments
+                                        .Any(ta => ta.ProgramCourseId == pc.Id)
+                })
+                .ToListAsync();
+
+            return Ok(rows);
+        }
+
+        // ==============================================================
+        // GET: api/program-courses/filter?programId=&batchId=&semesterId=
+        // (kept as-is for backward compatibility)
         // ==============================================================
         [HttpGet("filter")]
         public async Task<IActionResult> GetFilteredCourses(
@@ -69,7 +121,7 @@ namespace UniversityPortal.API.Controllers
                     courseCode = pc.Course != null ? pc.Course.Code : "N/A",
                     courseName = pc.Course != null ? pc.Course.Name : "Unknown Course",
                     creditHours = pc.Course != null ? pc.Course.CreditHours : 0,
-                    sections = pc.Sections // The text[] array from the database
+                    sections = pc.Sections
                 })
                 .ToListAsync();
 
@@ -79,7 +131,7 @@ namespace UniversityPortal.API.Controllers
         // ==============================================================
         // GET: api/program-courses/{id}
         // ==============================================================
-        [HttpGet("{id}")]
+        [HttpGet("{id:long}")]
         public async Task<IActionResult> GetById(long id)
         {
             var pc = await _context.ProgramCourses
@@ -101,7 +153,6 @@ namespace UniversityPortal.API.Controllers
         [RoleRequirementFilter("superadmin,systemadmin")]
         public async Task<IActionResult> AssignCourse([FromBody] ProgramCourse assignment)
         {
-            // --- 1. Validate FK references exist ---
             var programOk = await _context.Programs.AnyAsync(p => p.Id == assignment.ProgramId);
             var courseOk = await _context.Courses.AnyAsync(c => c.Id == assignment.CourseId);
             var batchOk = await _context.Batches.AnyAsync(b => b.Id == assignment.BatchId);
@@ -111,7 +162,6 @@ namespace UniversityPortal.API.Controllers
             if (!programOk || !courseOk || !batchOk || !sessionOk || !semesterOk)
                 return BadRequest(new { message = "Invalid program/course/batch/session/semester reference." });
 
-            // --- 2. Duplicate check ---
             var exists = await _context.ProgramCourses.AnyAsync(pc =>
                 pc.ProgramId == assignment.ProgramId &&
                 pc.CourseId == assignment.CourseId &&
@@ -122,12 +172,10 @@ namespace UniversityPortal.API.Controllers
             if (exists)
                 return Conflict(new { message = "Course is already assigned for this program, batch, session, and semester." });
 
-            // --- 3. Persist ---
             assignment.CreatedAt = DateTime.UtcNow;
             _context.ProgramCourses.Add(assignment);
             await _context.SaveChangesAsync();
 
-            // Re-load navigation props so the client gets a complete row
             await _context.Entry(assignment).Reference(x => x.Course).LoadAsync();
             await _context.Entry(assignment).Reference(x => x.Program).LoadAsync();
             await _context.Entry(assignment).Reference(x => x.Batch).LoadAsync();
@@ -140,14 +188,13 @@ namespace UniversityPortal.API.Controllers
         // ==============================================================
         // PUT: Update an existing assignment
         // ==============================================================
-        [HttpPut("{id}")]
+        [HttpPut("{id:long}")]
         [RoleRequirementFilter("superadmin,systemadmin")]
         public async Task<IActionResult> Update(long id, [FromBody] ProgramCourse updated)
         {
             var existing = await _context.ProgramCourses.FindAsync(id);
             if (existing == null) return NotFound();
 
-            // Validate FK references exist
             var programOk = await _context.Programs.AnyAsync(p => p.Id == updated.ProgramId);
             var courseOk = await _context.Courses.AnyAsync(c => c.Id == updated.CourseId);
             var batchOk = await _context.Batches.AnyAsync(b => b.Id == updated.BatchId);
@@ -157,7 +204,6 @@ namespace UniversityPortal.API.Controllers
             if (!programOk || !courseOk || !batchOk || !sessionOk || !semesterOk)
                 return BadRequest(new { message = "Invalid program/course/batch/session/semester reference." });
 
-            // Duplicate check excluding itself
             var duplicate = await _context.ProgramCourses.AnyAsync(pc =>
                 pc.Id != id &&
                 pc.ProgramId == updated.ProgramId &&
@@ -180,18 +226,67 @@ namespace UniversityPortal.API.Controllers
         }
 
         // ==============================================================
-        // DELETE: Remove an assignment
+        // DELETE: api/program-courses/{id}
+        // Removes only the ASSIGNMENT row — the course itself stays.
         // ==============================================================
-        [HttpDelete("{id}")]
+        [HttpDelete("{id:long}")]
         [RoleRequirementFilter("superadmin,systemadmin")]
         public async Task<IActionResult> Delete(long id)
         {
-            var pc = await _context.ProgramCourses.FindAsync(id);
-            if (pc == null) return NotFound();
+            var pc = await _context.ProgramCourses
+                .Include(x => x.Course)
+                .Include(x => x.Program)
+                .Include(x => x.Batch)
+                .Include(x => x.Semester)
+                .FirstOrDefaultAsync(x => x.Id == id);
+
+            if (pc == null)
+                return NotFound(new { message = "Assignment not found." });
+
+            // Guard 1: block if students are still enrolled
+            var enrolledCount = await _context.StudentRegistrations
+                .CountAsync(r => r.ProgramCourseId == id);
+
+            if (enrolledCount > 0)
+            {
+                return BadRequest(new
+                {
+                    message = $"{enrolledCount} student(s) are currently enrolled in " +
+                              $"'{pc.Course?.Code} - {pc.Course?.Name}'. " +
+                              $"Un-enroll them before removing this assignment."
+                });
+            }
+
+            // Guard 2: block if a teacher is still assigned
+            var hasTeacher = await _context.TeacherAssignments
+                .AnyAsync(ta => ta.ProgramCourseId == id);
+
+            if (hasTeacher)
+            {
+                return BadRequest(new
+                {
+                    message = $"A teacher is still assigned to teach '{pc.Course?.Code}' for this section. " +
+                              $"Remove the teacher assignment first."
+                });
+            }
 
             _context.ProgramCourses.Remove(pc);
             await _context.SaveChangesAsync();
-            return NoContent();
+
+            return Ok(new
+            {
+                message = $"Removed '{pc.Course?.Code} - {pc.Course?.Name}' from " +
+                          $"{pc.Program?.Code} / {pc.Batch?.Name} / {pc.Semester?.Name}.",
+                removed = new
+                {
+                    id = pc.Id,
+                    courseCode = pc.Course?.Code,
+                    courseName = pc.Course?.Name,
+                    programCode = pc.Program?.Code,
+                    batchName = pc.Batch?.Name,
+                    semesterName = pc.Semester?.Name
+                }
+            });
         }
     }
 }

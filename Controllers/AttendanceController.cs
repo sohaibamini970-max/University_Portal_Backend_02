@@ -17,7 +17,8 @@ namespace UniversityPortal.API.Controllers
         public class MarkAttendanceRequest
         {
             public long TeacherAssignmentId { get; set; }
-            public string Date { get; set; } = string.Empty;
+            public long AcademicCalendarId { get; set; }   // ← NEW
+            public string Date { get; set; } = string.Empty; // still sent, used as a sanity check
             public List<StudentAttendance> Students { get; set; } = new();
             public string Remarks { get; set; } = string.Empty;
         }
@@ -89,47 +90,71 @@ namespace UniversityPortal.API.Controllers
             return Ok(dates);
         }
 
-        // ==============================================================
-        // 3. GET: api/attendance/class-students?teacherAssignmentId=1&date=2023-11-20
-        // Fetches students for the specific section and their current attendance status
-        // ==============================================================
+        // ===============================================================================
+        // 3. GET: api/attendance/class-students?teacherAssignmentId=1&date=2023-11-20====
+        // Fetches students for the specific section and their current attendance status==
+        // ===============================================================================
         [HttpGet("class-students")]
         [RoleRequirementFilter("teacher")]
-        public async Task<IActionResult> GetClassStudents([FromQuery] long teacherAssignmentId, [FromQuery] string date)
+        public async Task<IActionResult> GetClassStudents(
+    [FromQuery] long teacherAssignmentId,
+    [FromQuery] long? academicCalendarId,
+    [FromQuery] string? date)
         {
             var assignment = await _context.TeacherAssignments
                 .FirstOrDefaultAsync(ta => ta.Id == teacherAssignmentId);
-
             if (assignment == null) return NotFound();
 
-            var parsedDate = DateTime.SpecifyKind(DateTime.Parse(date).Date, DateTimeKind.Utc);
+            AcademicCalendar? calendarEntry = null;
+            if (academicCalendarId.HasValue)
+            {
+                calendarEntry = await _context.AcademicCalendars
+                    .FirstOrDefaultAsync(c => c.Id == academicCalendarId.Value
+                                            && c.TeacherAssignmentId == teacherAssignmentId);
+            }
+            else if (!string.IsNullOrWhiteSpace(date))
+            {
+                var parsedDate = DateTime.SpecifyKind(DateTime.Parse(date).Date, DateTimeKind.Utc);
+                calendarEntry = await _context.AcademicCalendars
+                    .FirstOrDefaultAsync(c => c.TeacherAssignmentId == teacherAssignmentId
+                                            && c.Date == parsedDate);
+            }
 
-            // Fetch students registered in this section
+            if (calendarEntry == null)
+                return BadRequest(new { message = "Provide academicCalendarId (or date). Lecture not found." });
+
             var students = await _context.StudentRegistrations
                 .Include(r => r.StudentProfile)
-                .Where(r => r.ProgramCourseId == assignment.ProgramCourseId && r.Section.Name == assignment.SectionName)
+                .Where(r => r.ProgramCourseId == assignment.ProgramCourseId
+                         && r.Section.Name == assignment.SectionName)
                 .Select(r => new
                 {
                     id = r.StudentProfileId,
                     name = r.StudentProfile.FullName,
                     rollNo = r.StudentProfile.RollNo,
-                    // Check if attendance is already marked for this date
+
+                    // Count the student's total absences for this teacher_assignment
+                    totalAttendedClasses = _context.Attendances
+                        .Count(a => a.StudentProfileId == r.StudentProfileId
+                                 && a.TeacherAssignmentId == teacherAssignmentId
+                                 && a.Status == "Present"),
+
+                    // Current status for THIS specific lecture (keyed by calendar id)
                     isPresent = _context.Attendances
-                        .Any(a => a.StudentProfileId == r.StudentProfileId &&
-                                  a.TeacherAssignmentId == teacherAssignmentId &&
-                                  a.Date == parsedDate &&
-                                  a.Status == "Present")
+                        .Any(a => a.StudentProfileId == r.StudentProfileId
+                               && a.AcademicCalendarId == calendarEntry.Id
+                               && a.Status == "Present")
                 })
                 .OrderBy(s => s.rollNo)
                 .ToListAsync();
 
             return Ok(students);
         }
-
         // ==============================================================
         // 4. POST: api/attendance/mark
         // Saves or updates the attendance for the students
         // ==============================================================
+
 
         [HttpPost("mark")]
         [RoleRequirementFilter("teacher")]
@@ -137,39 +162,42 @@ namespace UniversityPortal.API.Controllers
         {
             try
             {
-                // 1. Verify the teacher
                 var userIdStr = User.FindFirst(ClaimTypes.NameIdentifier)?.Value ?? User.FindFirst("sub")?.Value;
                 if (!Guid.TryParse(userIdStr, out Guid userId)) return Unauthorized();
 
                 var teacher = await _context.Teachers.FirstOrDefaultAsync(t => t.ProfileId == userId);
+                if (teacher == null) return Unauthorized();
+
                 var assignment = await _context.TeacherAssignments
                     .FirstOrDefaultAsync(ta => ta.Id == request.TeacherAssignmentId && ta.TeacherId == teacher.Id);
-
                 if (assignment == null) return Forbid();
 
-                // 2. Check if globally locked
                 if (assignment.IsAttendanceLocked)
                     return BadRequest(new { message = "Attendance is globally locked by the System Admin." });
 
-                // 3. Check if the specific week is restricted
-                var parsedDate = DateTime.SpecifyKind(DateTime.Parse(request.Date).Date, DateTimeKind.Utc);
+                // ✅ THE KEY CHANGE: identify the lecture by academic_calendar_id,
+                //    not just by date. This lets multiple lectures on the same
+                //    date be tracked separately.
+                if (request.AcademicCalendarId == 0)
+                    return BadRequest(new { message = "AcademicCalendarId is required to mark attendance." });
 
-                // 👇 THIS IS THE SINGLE DECLARATION YOU NEED 👇
                 var calendarEntry = await _context.AcademicCalendars
-                    .FirstOrDefaultAsync(c => c.TeacherAssignmentId == request.TeacherAssignmentId && c.Date == parsedDate);
+               .FirstOrDefaultAsync(c => c.Id == request.AcademicCalendarId
+                             && c.TeacherAssignmentId == request.TeacherAssignmentId);
+                if (calendarEntry == null)
+                    return BadRequest(new { message = "Calendar entry not found for this teacher assignment." });
 
-                if (calendarEntry != null && !calendarEntry.IsAttendanceAllowed)
-                {
+                if (!calendarEntry.IsAttendanceAllowed)
                     return BadRequest(new { message = "Attendance for this week is restricted by the Admin." });
-                }
 
-                // 4. Save Attendance
+                // ✅ Coerce to UTC so Npgsql accepts the write to timestamptz
+                var parsedDate = DateTime.SpecifyKind(calendarEntry.Date.Date, DateTimeKind.Utc);
+
                 foreach (var student in request.Students)
                 {
                     var existing = await _context.Attendances
-                        .FirstOrDefaultAsync(a => a.StudentProfileId == student.StudentProfileId &&
-                                                  a.TeacherAssignmentId == request.TeacherAssignmentId &&
-                                                  a.Date == parsedDate);
+                        .FirstOrDefaultAsync(a => a.StudentProfileId == student.StudentProfileId
+                                                && a.AcademicCalendarId == calendarEntry.Id);
 
                     if (existing != null)
                     {
@@ -182,6 +210,7 @@ namespace UniversityPortal.API.Controllers
                         {
                             StudentProfileId = student.StudentProfileId,
                             TeacherAssignmentId = request.TeacherAssignmentId,
+                            AcademicCalendarId = calendarEntry.Id,
                             Date = parsedDate,
                             Status = student.IsPresent ? "Present" : "Absent",
                             Remarks = request.Remarks,
@@ -198,7 +227,6 @@ namespace UniversityPortal.API.Controllers
                 return StatusCode(500, new { message = "Database error", details = ex.Message });
             }
         }
-
 
         // ==============================================================
         // 5. GET: api/attendance/my-attendance
@@ -219,9 +247,11 @@ namespace UniversityPortal.API.Controllers
                 {
                     courseCode = g.Key.Code,
                     courseName = g.Key.Name,
-                    totalClasses = g.Count(),
+                    totalClasses = g.Count(),                          // ← now includes each lecture
                     attendedClasses = g.Count(a => a.Status == "Present"),
-                    percentage = g.Count() > 0 ? (int)((double)g.Count(a => a.Status == "Present") / g.Count() * 100) : 0
+                    percentage = g.Count() > 0
+                        ? (int)((double)g.Count(a => a.Status == "Present") / g.Count() * 100)
+                        : 0
                 })
                 .ToListAsync();
 

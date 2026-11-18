@@ -160,46 +160,71 @@ namespace UniversityPortal.API.Controllers
 
         // GET: api/timetables/my-timetable
         [HttpGet("my-timetable")]
-        [RoleRequirementFilter("teacher")]
+        [RoleRequirementFilter("student")]
         public async Task<IActionResult> GetMyTimetable()
         {
-            // 1. Get the logged-in user's Profile ID from the Token
             var userIdStr = User.FindFirst(ClaimTypes.NameIdentifier)?.Value ?? User.FindFirst("sub")?.Value;
             if (!Guid.TryParse(userIdStr, out Guid userId)) return Unauthorized();
 
-            // 2. Find the Teacher record
-            var teacher = await _context.Teachers.FirstOrDefaultAsync(t => t.ProfileId == userId);
-            if (teacher == null) return NotFound(new { message = "Teacher profile not found." });
+            var registration = await _context.StudentRegistrations
+                .Include(r => r.Section)
+                .FirstOrDefaultAsync(r => r.StudentProfileId == userId);
 
-            // 3. Fetch all timetables for this teacher
+            if (registration == null || registration.Section == null)
+            {
+                Console.WriteLine($"[TIMETABLE] user={userId} → no registration or section");
+                return Ok(new List<object>());
+            }
+
+            var sectionName = registration.Section.Name;
+            var programId = registration.Section.ProgramId;
+            var batchId = registration.Section.BatchId;
+            var semesterId = registration.Section.SemesterId;
+
+            var rawCount = await _context.Timetables
+                .Where(t => t.TeacherAssignment.ProgramCourse.ProgramId == programId
+                         && t.TeacherAssignment.ProgramCourse.BatchId == batchId
+                         && t.TeacherAssignment.ProgramCourse.SemesterId == semesterId)
+                .CountAsync();
+
+            var matchCount = await _context.Timetables
+                .Where(t => t.TeacherAssignment.ProgramCourse.ProgramId == programId
+                         && t.TeacherAssignment.ProgramCourse.BatchId == batchId
+                         && t.TeacherAssignment.ProgramCourse.SemesterId == semesterId
+                         && t.TeacherAssignment.SectionName == sectionName)
+                .CountAsync();
+
+            Console.WriteLine(
+                $"[TIMETABLE] user={userId} section={sectionName} " +
+                $"program={programId} batch={batchId} semester={semesterId} " +
+                $"raw={rawCount} match={matchCount}");
+
             var schedule = await _context.Timetables
-                .Include(t => t.TeacherAssignment)
-                    .ThenInclude(ta => ta.ProgramCourse)
-                        .ThenInclude(pc => pc.Course)
-                .Include(t => t.TeacherAssignment)
-                    .ThenInclude(ta => ta.ProgramCourse)
-                        .ThenInclude(pc => pc.Program)
-                .Include(t => t.TeacherAssignment)
-                    .ThenInclude(ta => ta.ProgramCourse)
-                        .ThenInclude(pc => pc.Batch)
                 .Include(t => t.Room)
-                .Where(t => t.TeacherAssignment.TeacherId == teacher.Id)
+                .Include(t => t.TeacherAssignment).ThenInclude(ta => ta.Teacher).ThenInclude(tr => tr.Profile)
+                .Include(t => t.TeacherAssignment).ThenInclude(ta => ta.ProgramCourse).ThenInclude(pc => pc.Course)
+                .Where(t => t.TeacherAssignment.SectionName == sectionName
+                         && t.TeacherAssignment.ProgramCourse.ProgramId == programId
+                         && t.TeacherAssignment.ProgramCourse.BatchId == batchId
+                         && t.TeacherAssignment.ProgramCourse.SemesterId == semesterId)
                 .Select(t => new
                 {
                     id = t.Id,
                     dayOfWeek = t.DayOfWeek,
                     timeSlot = t.TimeSlot,
-                    roomName = t.Room.RoomNumber,
+                    roomName = t.Room != null ? t.Room.RoomNumber : "—",
                     courseCode = t.TeacherAssignment.ProgramCourse.Course.Code,
                     courseName = t.TeacherAssignment.ProgramCourse.Course.Name,
-                    programName = t.TeacherAssignment.ProgramCourse.Program.Name,
-                    batchName = t.TeacherAssignment.ProgramCourse.Batch.Name,
-                    section = t.TeacherAssignment.SectionName
+                    teacherName = t.TeacherAssignment.Teacher.Profile != null
+                                    ? t.TeacherAssignment.Teacher.Profile.FullName
+                                    : "Not Assigned"
                 })
                 .ToListAsync();
 
+            Console.WriteLine($"[TIMETABLE] → returning {schedule.Count} rows");
             return Ok(schedule);
         }
+
         // Add this to TimetablesController.cs
         [HttpGet("teacher-schedule-by-date")]
         [RoleRequirementFilter("teacher")]

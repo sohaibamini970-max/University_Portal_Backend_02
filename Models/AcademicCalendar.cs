@@ -34,5 +34,8 @@ namespace UniversityPortal.API.Models
 
         [Column("is_attendance_allowed")]
         public bool IsAttendanceAllowed { get; set; } = true;
+
+        [Column("time_slot")]
+        public string? TimeSlot { get; set; }
     }
 }

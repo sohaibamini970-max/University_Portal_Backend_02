@@ -215,6 +215,255 @@ namespace UniversityPortal.API.Controllers
             }
         }
 
+        public class BulkStudentRow
+        {
+            public string? SequenceNo { get; set; }
+            public string? FullName { get; set; }
+            public string? FatherName { get; set; }
+            public string? Email { get; set; }
+            public string? Phone { get; set; }
+            public string? CNIC { get; set; }
+            public string? DepartmentName { get; set; }
+            public string? ProgramCode { get; set; }
+            public string? BatchName { get; set; }
+            public string? Section { get; set; }
+        }
+
+        public class BulkRegisterRequest
+        {
+            public List<BulkStudentRow>? Students { get; set; }
+        }
+
+        public class BulkActivateRequest
+        {
+            public string? Search { get; set; }   // optional — mirrors the admin list filter
+        }
+
+        [HttpPost("admin/bulk-activate")]
+        [RoleRequirementFilter("superadmin,systemadmin")]
+        public async Task<IActionResult> BulkActivateStudents([FromBody] BulkActivateRequest request)
+        {
+            var search = request?.Search?.Trim();
+
+            // Build the query for INACTIVE students only
+            var query = _context.Students
+                .Include(s => s.Profile)
+                .Where(s => !s.IsActive || (s.Profile != null && !s.Profile.IsActive));
+
+            if (!string.IsNullOrWhiteSpace(search))
+            {
+                var term = search.ToLower();
+                query = query.Where(s =>
+                    s.Profile.FullName.ToLower().Contains(term) ||
+                    (s.Profile.RollNo != null && s.Profile.RollNo.ToLower().Contains(term)) ||
+                    s.Profile.Email.ToLower().Contains(term));
+            }
+
+            var students = await query.ToListAsync();
+
+            if (students.Count == 0)
+                return Ok(new { message = "No inactive students to activate.", activatedCount = 0 });
+
+            foreach (var s in students)
+            {
+                s.IsActive = true;
+                if (s.Profile != null)
+                {
+                    s.Profile.IsActive = true;
+                    s.Profile.UpdatedAt = DateTime.UtcNow;
+                }
+            }
+
+            await _context.SaveChangesAsync();
+
+            return Ok(new
+            {
+                message = $"{students.Count} student{(students.Count == 1 ? "" : "s")} activated successfully.",
+                activatedCount = students.Count
+            });
+        }
+
+        [HttpPost("bulk-register")]
+        [RoleRequirementFilter("department_admin,superadmin,systemadmin")]
+        [Consumes("application/json")]
+        public async Task<IActionResult> BulkRegister(
+            [FromBody] BulkRegisterRequest request,
+            [FromServices] Supabase.Client supabase,
+            [FromServices] IConfiguration config)
+        {
+            if (request.Students == null || request.Students.Count == 0)
+                return BadRequest(new { message = "No students provided." });
+
+            const string DEFAULT_PASSWORD = "Student123!";
+            var successCount = 0;
+            var errors = new List<object>();
+            var adminClient = CreateAdminClient(config);
+
+            // Pre-fetch reference data to avoid N+1 queries
+            var departments = await _context.Departments.AsNoTracking().ToListAsync();
+            var programs = await _context.Programs.AsNoTracking().ToListAsync();
+            var batches = await _context.Batches.AsNoTracking().ToListAsync();
+            var firstSem = await _context.Semesters.FirstOrDefaultAsync(s => s.Name.Contains("1"));
+            if (firstSem == null)
+                return BadRequest(new { message = "1st Semester not configured in system." });
+
+            for (int i = 0; i < request.Students.Count; i++)
+            {
+                var row = request.Students[i];
+                var rowNum = i + 2; // Excel row (header is row 1)
+
+                try
+                {
+                    // --- Validate references ---
+                    var dept = departments.FirstOrDefault(d =>
+                        d.Name.Equals(row.DepartmentName?.Trim(), StringComparison.OrdinalIgnoreCase));
+                    if (dept == null) { errors.Add(new { row = rowNum, message = $"Department '{row.DepartmentName}' not found." }); continue; }
+
+                    var program = programs.FirstOrDefault(p =>
+                        p.Code.Equals(row.ProgramCode?.Trim(), StringComparison.OrdinalIgnoreCase));
+                    if (program == null) { errors.Add(new { row = rowNum, message = $"Program code '{row.ProgramCode}' not found." }); continue; }
+
+                    var batch = batches.FirstOrDefault(b =>
+                        b.Name.Equals(row.BatchName?.Trim(), StringComparison.OrdinalIgnoreCase));
+                    if (batch == null) { errors.Add(new { row = rowNum, message = $"Batch '{row.BatchName}' not found." }); continue; }
+
+                    if (string.IsNullOrWhiteSpace(row.Email) || !row.Email.Contains('@'))
+                    { errors.Add(new { row = rowNum, message = "Invalid email." }); continue; }
+
+                    // Duplicate email check (in DB)
+                    if (await _context.Profiles.AnyAsync(p => p.Email.ToLower() == row.Email.ToLower()))
+                    { errors.Add(new { row = rowNum, message = $"Email '{row.Email}' already registered." }); continue; }
+
+                    // --- Generate Roll No ---
+                    var paddedSeq = (row.SequenceNo ?? "").PadLeft(3, '0');
+                    var rollNo = $"{batch.StartYear}F-{program.Code}-{paddedSeq}";
+
+                    // --- Create Supabase Auth user ---
+                    Supabase.Gotrue.User? authUser = null;
+                    try
+                    {
+                        authUser = await adminClient.CreateUser(new Supabase.Gotrue.AdminUserAttributes
+                        {
+                            Email = row.Email,
+                            Password = DEFAULT_PASSWORD,
+                            EmailConfirm = true,
+                            UserMetadata = new Dictionary<string, object>
+                    {
+                        { "full_name", row.FullName },
+                        { "role", "student" }
+                    }
+                        });
+                    }
+                    catch (Exception authEx)
+                    {
+                        errors.Add(new { row = rowNum, message = $"Auth creation failed: {authEx.Message}" });
+                        continue;
+                    }
+
+                    if (authUser == null)
+                    { errors.Add(new { row = rowNum, message = "Auth user creation returned null." }); continue; }
+
+                    await Task.Delay(300); // let trigger create profile if configured
+
+                    // --- Create/Update Profile ---
+                    var profile = await _context.Profiles.FirstOrDefaultAsync(p => p.Email == row.Email);
+                    if (profile == null)
+                    {
+                        profile = new Profile
+                        {
+                            Id = Guid.Parse(authUser.Id),
+                            Email = row.Email,
+                            FullName = row.FullName,
+                            Role = ProfileRole.student,
+                            IsActive = false,
+                            RollNo = rollNo,
+                            Phone = string.IsNullOrWhiteSpace(row.Phone) ? null : row.Phone.Trim(),
+                            CreatedAt = DateTime.UtcNow,
+                            UpdatedAt = DateTime.UtcNow
+                        };
+                        _context.Profiles.Add(profile);
+                    }
+                    else
+                    {
+                        profile.RollNo = rollNo;
+                        profile.FullName = row.FullName;
+                        profile.IsActive = false;
+                        profile.Phone = string.IsNullOrWhiteSpace(row.Phone) ? null : row.Phone.Trim();
+                        profile.UpdatedAt = DateTime.UtcNow;
+                    }
+
+                    // --- Create Student ---
+                    var student = new Student
+                    {
+                        ProfileId = profile.Id,
+                        DepartmentId = dept.Id,
+                        ProgramId = program.Id,
+                        BatchId = batch.Id,
+                        Section = row.Section?.Trim() ?? "",
+                        FatherName = row.FatherName?.Trim() ?? "",
+                        IsActive = false
+                    };
+                    _context.Students.Add(student);
+                    await _context.SaveChangesAsync();
+
+                    // --- Validate Section config ---
+                    var sectionRecord = await _context.Sections.FirstOrDefaultAsync(s =>
+                        s.ProgramId == program.Id &&
+                        s.BatchId == batch.Id &&
+                        s.SemesterId == firstSem.Id &&
+                        s.Name == student.Section);
+
+                    if (sectionRecord == null)
+                    {
+                        errors.Add(new { row = rowNum, message = $"Section '{student.Section}' not configured for this Program/Batch." });
+                        continue;
+                    }
+
+                    // --- Auto-assign 1st semester courses ---
+                    var assignedCourses = await _context.ProgramCourses
+                        .Where(pc => pc.ProgramId == program.Id &&
+                                     pc.BatchId == batch.Id &&
+                                     pc.SemesterId == firstSem.Id &&
+                                     pc.Sections.Contains(student.Section))
+                        .ToListAsync();
+
+                    if (assignedCourses.Count == 0)
+                    {
+                        errors.Add(new { row = rowNum, message = $"No courses assigned for Section '{student.Section}'." });
+                        continue;
+                    }
+
+                    foreach (var course in assignedCourses)
+                    {
+                        _context.StudentRegistrations.Add(new StudentRegistration
+                        {
+                            StudentProfileId = profile.Id,
+                            ProgramCourseId = course.Id,
+                            SectionId = sectionRecord.Id,
+                            Status = "Enrolled",
+                            RegisteredAt = DateTime.UtcNow
+                        });
+                    }
+                    await _context.SaveChangesAsync();
+                    successCount++;
+                }
+                catch (Exception ex)
+                {
+                    var msg = ex.InnerException?.Message ?? ex.Message;
+                    Console.WriteLine($"[BULK REGISTER ROW {rowNum}]: {msg}");
+                    errors.Add(new { row = rowNum, message = msg });
+                }
+            }
+
+            return Ok(new
+            {
+                message = $"{successCount} of {request.Students.Count} student(s) registered successfully. Default password: {DEFAULT_PASSWORD}",
+                successCount,
+                failedCount = errors.Count,
+                errors
+            });
+        }
+
         // GET: api/students/registrations
         [HttpGet("registrations")]
         [RoleRequirementFilter("superadmin,systemadmin")]
