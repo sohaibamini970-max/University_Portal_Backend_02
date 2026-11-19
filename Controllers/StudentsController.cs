@@ -10,7 +10,7 @@ using System.Security.Claims;
 namespace UniversityPortal.API.Controllers
 {
     [ApiController]
-    [Route("api/students")]
+    [Route("api/students")]  
     public class StudentsController : ControllerBase
     {
         private readonly ApplicationDbContext _context;

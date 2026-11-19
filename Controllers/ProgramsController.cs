@@ -108,5 +108,25 @@ namespace UniversityPortal.API.Controllers
 
             return NoContent();
         }
+
+        public class ToggleFeeVoucherRequest { public bool Enabled { get; set; } }
+
+        [HttpPut("{id:long}/fee-voucher")]
+        [RoleRequirementFilter("superadmin,systemadmin,finance_admin")]
+        public async Task<IActionResult> ToggleFeeVoucher(long id, [FromBody] ToggleFeeVoucherRequest request)
+        {
+            var program = await _context.Programs.FindAsync(id);
+            if (program == null) return NotFound(new { message = "Program not found." });
+
+            program.FeeVoucherEnabled = request.Enabled;
+            program.UpdatedAt = DateTime.UtcNow;
+            await _context.SaveChangesAsync();
+
+            return Ok(new
+            {
+                message = $"Fee voucher {(request.Enabled ? "enabled" : "disabled")} for {program.Code}.",
+                feeVoucherEnabled = program.FeeVoucherEnabled
+            });
+        }
     }
 }

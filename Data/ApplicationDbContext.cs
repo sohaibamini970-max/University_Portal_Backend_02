@@ -22,7 +22,6 @@ namespace UniversityPortal.API.Data
         public DbSet<Room> Rooms { get; set; }
         public DbSet<TimeSlot> TimeSlots { get; set; }
 
-        // 👇 NEW DbSets 👇
         public DbSet<Student> Students { get; set; }
         public DbSet<Section> Sections { get; set; }
         public DbSet<StudentRegistration> StudentRegistrations { get; set; }
@@ -32,10 +31,20 @@ namespace UniversityPortal.API.Data
 
         public DbSet<CalendarSlot> CalendarSlots { get; set; }
         public DbSet<Admin> Admins => Set<Admin>();
+        public DbSet<FeeStructure> FeeStructures { get; set; }
+        public DbSet<StudentFee> StudentFees { get; set; }
+        public DbSet<AssessmentSplit> AssessmentSplits { get; set; }
+        public DbSet<FeeInstallment> FeeInstallments { get; set; }
+
+        // 👇 KEEPING THE 'S' AS REQUESTED 👇
+        public DbSet<AssessmentTypes> AssessmentTypes { get; set; }
+        public DbSet<StudentAssessmentMarks> StudentAssessmentMarks { get; set; }
+        public DbSet<CourseAssessmentConfigs> CourseAssessmentConfigs { get; set; }
 
         protected override void OnModelCreating(ModelBuilder modelBuilder)
         {
             base.OnModelCreating(modelBuilder);
+
             // ==========================================
             // 1. UNIQUE CONSTRAINTS
             // ==========================================
@@ -59,7 +68,9 @@ namespace UniversityPortal.API.Data
                 .Property(d => d.Type)
                 .HasColumnType("department_type");
 
-
+            // ==========================================
+            // 3. ADMIN RELATIONSHIPS
+            // ==========================================
             modelBuilder.Entity<Admin>(e =>
             {
                 e.ToTable("admins");
@@ -89,7 +100,7 @@ namespace UniversityPortal.API.Data
             });
 
             // ==========================================
-            // 3. PROFILE & DEPARTMENT RELATIONSHIPS
+            // 4. PROFILE & DEPARTMENT RELATIONSHIPS
             // ==========================================
             modelBuilder.Entity<Department>()
                 .HasOne(d => d.Admin)
@@ -115,15 +126,14 @@ namespace UniversityPortal.API.Data
                 .HasForeignKey<Teacher>(t => t.ProfileId)
                 .OnDelete(DeleteBehavior.Cascade);
 
-            // 👇 NEW: Student -> Profile Relationship 👇
             modelBuilder.Entity<Student>()
                 .HasOne(s => s.Profile)
-                .WithOne(p => p.StudentRecord) // Ensure Profile model has 'public Student? StudentRecord { get; set; }'
+                .WithOne(p => p.StudentRecord)
                 .HasForeignKey<Student>(s => s.ProfileId)
                 .OnDelete(DeleteBehavior.Cascade);
 
             // ==========================================
-            // 4. PROGRAM COURSE RELATIONSHIPS
+            // 5. PROGRAM COURSE RELATIONSHIPS
             // ==========================================
             modelBuilder.Entity<ProgramCourse>()
                 .HasOne(pc => pc.Program)
@@ -173,7 +183,7 @@ namespace UniversityPortal.API.Data
                 .HasDatabaseName("ux_program_courses_unique_assignment");
 
             // ==========================================
-            // 5. COURSE SELF-REFERENCING (PREREQUISITE)
+            // 6. COURSE SELF-REFERENCING (PREREQUISITE)
             // ==========================================
             modelBuilder.Entity<Course>()
                 .HasOne(c => c.Prerequisite)
@@ -182,7 +192,7 @@ namespace UniversityPortal.API.Data
                 .OnDelete(DeleteBehavior.SetNull);
 
             // ==========================================
-            // 6. PROGRAM SESSION SEMESTER RELATIONSHIPS
+            // 7. PROGRAM SESSION SEMESTER RELATIONSHIPS
             // ==========================================
             modelBuilder.Entity<ProgramSessionSemester>()
                 .HasIndex(x => new { x.ProgramId, x.BatchId, x.SessionId, x.SemesterId })
@@ -213,7 +223,7 @@ namespace UniversityPortal.API.Data
                 .OnDelete(DeleteBehavior.Restrict);
 
             // ==========================================
-            // 7. SESSION DATE COLUMNS 
+            // 8. SESSION DATE COLUMNS 
             // ==========================================
             modelBuilder.Entity<Session>()
                 .Property(s => s.StartDate)
@@ -224,10 +234,8 @@ namespace UniversityPortal.API.Data
                 .HasColumnType("date");
 
             // ==========================================
-            // 8. 👇 NEW: STUDENT & SECTION RELATIONSHIPS 👇
+            // 9. STUDENT & SECTION RELATIONSHIPS
             // ==========================================
-
-            // Student -> Department, Program, Batch
             modelBuilder.Entity<Student>()
                 .HasOne(s => s.Department)
                 .WithMany()
@@ -246,10 +254,9 @@ namespace UniversityPortal.API.Data
                 .HasForeignKey(s => s.BatchId)
                 .OnDelete(DeleteBehavior.Restrict);
 
-            // Section -> Program, Batch, Semester
             modelBuilder.Entity<Section>()
                 .HasIndex(s => new { s.ProgramId, s.BatchId, s.SemesterId, s.Name })
-                .IsUnique(); // Unique constraint for Section A, B, etc. per batch/sem
+                .IsUnique();
 
             modelBuilder.Entity<Section>()
                 .HasOne(s => s.Program)
@@ -269,7 +276,6 @@ namespace UniversityPortal.API.Data
                 .HasForeignKey(s => s.SemesterId)
                 .OnDelete(DeleteBehavior.Cascade);
 
-            // StudentRegistration -> Student, ProgramCourse, Section
             modelBuilder.Entity<StudentRegistration>()
                 .HasOne(r => r.StudentProfile)
                 .WithMany()
@@ -289,7 +295,7 @@ namespace UniversityPortal.API.Data
                 .OnDelete(DeleteBehavior.Restrict);
 
             // ==========================================
-            // 9. TEACHER ASSIGNMENTS RELATIONSHIPS
+            // 10. TEACHER ASSIGNMENTS RELATIONSHIPS
             // ==========================================
             modelBuilder.Entity<TeacherAssignment>()
                 .HasOne(ta => ta.Teacher)
@@ -321,16 +327,12 @@ namespace UniversityPortal.API.Data
                 .HasForeignKey(a => a.TeacherAssignmentId)
                 .OnDelete(DeleteBehavior.Cascade);
 
-            // ✅ ADD THIS
             modelBuilder.Entity<AcademicCalendar>()
                 .HasOne(c => c.TeacherAssignment)
                 .WithMany()
                 .HasForeignKey(c => c.TeacherAssignmentId)
                 .OnDelete(DeleteBehavior.Cascade);
 
-            // Add this with the other DbSets
-
-            // Inside OnModelCreating, add this at the bottom:
             modelBuilder.Entity<CalendarSlot>()
                 .HasOne(cs => cs.AcademicCalendar)
                 .WithMany()
@@ -342,6 +344,123 @@ namespace UniversityPortal.API.Data
                 .WithMany()
                 .HasForeignKey(cs => cs.TeacherAssignmentId)
                 .OnDelete(DeleteBehavior.Cascade);
-    }
+
+            // ==========================================
+            // 11. FEE MODULE RELATIONSHIPS
+            // ==========================================
+            modelBuilder.Entity<FeeStructure>()
+               .HasIndex(f => new { f.ProgramId, f.BatchId })
+               .IsUnique();
+
+            modelBuilder.Entity<StudentFee>()
+                .HasIndex(f => new { f.StudentProfileId, f.SemesterId })
+                .IsUnique();
+
+            modelBuilder.Entity<FeeInstallment>(entity =>
+            {
+                entity.ToTable("fee_installments");
+
+                entity.HasIndex(i => new { i.StudentFeeId, i.InstallmentNumber })
+                      .IsUnique()
+                      .HasDatabaseName("uq_installment_student_fee_number");
+
+                entity.HasOne(i => i.StudentFee)
+                      .WithMany(sf => sf.Installments)
+                      .HasForeignKey(i => i.StudentFeeId)
+                      .OnDelete(DeleteBehavior.Cascade);
+
+                entity.Property(i => i.Amount).HasColumnType("numeric(12,2)");
+                entity.Property(i => i.PaidAmount).HasColumnType("numeric(12,2)");
+                entity.Property(i => i.DueDate).HasColumnType("date");
+            });
+
+            // ==========================================
+            // 12. ASSESSMENT MODULE EXPLICIT MAPPINGS
+            // ==========================================
+            modelBuilder.Entity<AssessmentTypes>(entity =>
+            {
+                entity.ToTable("assessment_types");
+                entity.HasKey(e => e.Id);
+                entity.Property(e => e.Id).HasColumnName("id");
+                entity.Property(e => e.Name).HasColumnName("name");
+                entity.Property(e => e.Category).HasColumnName("category");
+                entity.Property(e => e.DefaultTotalMarks).HasColumnName("default_total_marks");
+                entity.Property(e => e.IsFixed).HasColumnName("is_fixed");
+                entity.Property(e => e.IsActive).HasColumnName("is_active");
+                entity.Property(e => e.CreatedAt).HasColumnName("created_at");
+            });
+
+            modelBuilder.Entity<CourseAssessmentConfigs>(entity =>
+            {
+                entity.ToTable("course_assessment_configs");
+                entity.HasKey(e => e.Id);
+                entity.Property(e => e.Id).HasColumnName("id");
+                entity.Property(e => e.ProgramCourseId).HasColumnName("program_course_id");
+                entity.Property(e => e.AssessmentTypeId).HasColumnName("assessment_type_id");
+                entity.Property(e => e.CustomTotalMarks).HasColumnName("custom_total_marks");
+                entity.Property(e => e.IsEnabled).HasColumnName("is_enabled");
+                entity.Property(e => e.CreatedAt).HasColumnName("created_at");
+                entity.Property(e => e.UpdatedAt).HasColumnName("updated_at");
+
+                entity.HasOne(c => c.ProgramCourse)
+                      .WithMany()
+                      .HasForeignKey(c => c.ProgramCourseId)
+                      .OnDelete(DeleteBehavior.Cascade);
+
+                entity.HasOne(c => c.AssessmentType)
+                      .WithMany()
+                      .HasForeignKey(c => c.AssessmentTypeId)
+                      .OnDelete(DeleteBehavior.Cascade);
+            });
+
+            modelBuilder.Entity<StudentAssessmentMarks>(entity =>
+            {
+                entity.ToTable("student_assessment_marks");
+                entity.HasKey(e => e.Id);
+                entity.Property(e => e.Id).HasColumnName("id");
+                entity.Property(e => e.StudentProfileId).HasColumnName("student_profile_id");
+                entity.Property(e => e.ProgramCourseId).HasColumnName("program_course_id");
+                entity.Property(e => e.AssessmentTypeId).HasColumnName("assessment_type_id");
+                entity.Property(e => e.SectionName).HasColumnName("section_name");
+                entity.Property(e => e.ObtainedMarks).HasColumnName("obtained_marks");
+                entity.Property(e => e.EnteredByTeacherId).HasColumnName("entered_by_teacher_id");
+                entity.Property(e => e.EnteredAt).HasColumnName("entered_at");
+
+                entity.HasOne(m => m.StudentProfile)
+                      .WithMany()
+                      .HasForeignKey(m => m.StudentProfileId)
+                      .OnDelete(DeleteBehavior.Cascade);
+
+                entity.HasOne(m => m.ProgramCourse)
+                      .WithMany()
+                      .HasForeignKey(m => m.ProgramCourseId)
+                      .OnDelete(DeleteBehavior.Cascade);
+
+                entity.HasOne(m => m.AssessmentType)
+                      .WithMany()
+                      .HasForeignKey(m => m.AssessmentTypeId)
+                      .OnDelete(DeleteBehavior.Cascade);
+            });
+            modelBuilder.Entity<AssessmentSplit>(entity =>
+            {
+                entity.ToTable("assessment_splits");
+                entity.HasKey(e => e.Id);
+                entity.Property(e => e.Id).HasColumnName("id");
+                entity.Property(e => e.ProgramCourseId).HasColumnName("program_course_id");
+                entity.Property(e => e.AssessmentTypeId).HasColumnName("assessment_type_id");
+                entity.Property(e => e.PartName).HasColumnName("part_name");
+                entity.Property(e => e.MaxMarks).HasColumnName("max_marks");
+
+                entity.HasOne(s => s.ProgramCourse)
+                      .WithMany()
+                      .HasForeignKey(s => s.ProgramCourseId)
+                      .OnDelete(DeleteBehavior.Cascade);
+
+                entity.HasOne(s => s.AssessmentType)
+                      .WithMany()
+                      .HasForeignKey(s => s.AssessmentTypeId)
+                      .OnDelete(DeleteBehavior.Cascade);
+            });
+        }
     }
 }

@@ -10,7 +10,8 @@ namespace UniversityPortal.API.Models
 
         [Column("department_id")]
         public long DepartmentId { get; set; }
-
+        [Column("fee_voucher_enabled")]
+        public bool FeeVoucherEnabled { get; set; }
         [Column("name")] public string Name { get; set; } = string.Empty;
         [Column("code")] public string Code { get; set; } = string.Empty;
         [Column("degree_level")] public string DegreeLevel { get; set; } = string.Empty;

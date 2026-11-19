@@ -6,6 +6,7 @@
         systemadmin,
         department_admin,
         teacher,
-        student
+        student,
+        finance_admin
     }
 }

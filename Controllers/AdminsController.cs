@@ -317,7 +317,9 @@ namespace UniversityPortal.API.Controllers
         // POST: api/admins
         [HttpPost]
         [RoleRequirementFilter("superadmin,systemadmin")]
-        public async Task<IActionResult> Create([FromBody] CreateAdminRequest request, [FromServices] IConfiguration config)
+        public async Task<IActionResult> Create(
+    [FromBody] CreateAdminRequest request,
+    [FromServices] IConfiguration config)
         {
             var caller = await GetCallerAsync();
             if (caller == null) return Unauthorized();
@@ -355,7 +357,7 @@ namespace UniversityPortal.API.Controllers
             if (await _context.Admins.AnyAsync(a => a.EmployeeId == employeeId))
                 return Conflict(new { message = $"Employee ID '{employeeId}' is already in use." });
 
-            // 1. Create the login account
+            // 1. Create the login account (Supabase call — outside the EF strategy)
             var adminClient = CreateAdminClient(config);
             Guid profileId;
             try
@@ -366,10 +368,10 @@ namespace UniversityPortal.API.Controllers
                     Password = request.Password,
                     EmailConfirm = true,
                     UserMetadata = new Dictionary<string, object>
-                    {
-                        { "full_name", fullName },
-                        { "role", role.ToString() }
-                    }
+            {
+                { "full_name", fullName },
+                { "role", role.ToString() }
+            }
                 });
 
                 if (authUser == null) return BadRequest(new { message = "Failed to create login account." });
@@ -380,57 +382,74 @@ namespace UniversityPortal.API.Controllers
                 return BadRequest(new { message = "Failed to create login account.", details = ex.Message });
             }
 
-            // 2. Write the profile and admin rows. If this fails, remove the login account.
+            // 2. Persist profile + admin rows.
+            //    The whole EF block is wrapped in the execution strategy.
             var adminId = Guid.NewGuid();
-            var profile = await WaitForProfileAsync(profileId);
 
             try
             {
-                await using var tx = await _context.Database.BeginTransactionAsync();
+                var strategy = _context.Database.CreateExecutionStrategy();
 
-                if (profile == null)
+                return await strategy.ExecuteAsync(async () =>
                 {
-                    profile = new Profile
+                    await using var tx = await _context.Database.BeginTransactionAsync();
+
+                    try
                     {
-                        Id = profileId,
-                        Email = email,
-                        CreatedAt = DateTime.UtcNow
-                    };
-                    _context.Profiles.Add(profile);
-                }
+                        var profile = await WaitForProfileAsync(profileId);
 
-                profile.FullName = fullName;
-                profile.Phone = NullIfBlank(request.Phone);
-                profile.Role = role;
-                profile.IsActive = true;
-                profile.DepartmentId = departmentId;
-                profile.UpdatedAt = DateTime.UtcNow;
+                        if (profile == null)
+                        {
+                            profile = new Profile
+                            {
+                                Id = profileId,
+                                Email = email,
+                                CreatedAt = DateTime.UtcNow
+                            };
+                            _context.Profiles.Add(profile);
+                        }
 
-                _context.Admins.Add(new Admin
-                {
-                    Id = adminId,
-                    ProfileId = profileId,
-                    DepartmentId = departmentId,
-                    EmployeeId = employeeId,
-                    Designation = request.Designation.Trim(),
-                    CreatedBy = caller.Id,
-                    CreatedAt = DateTime.UtcNow,
-                    UpdatedAt = DateTime.UtcNow
+                        profile.FullName = fullName;
+                        profile.Phone = NullIfBlank(request.Phone);
+                        profile.Role = role;
+                        profile.IsActive = true;
+                        profile.DepartmentId = departmentId;
+                        profile.UpdatedAt = DateTime.UtcNow;
+
+                        _context.Admins.Add(new Admin
+                        {
+                            Id = adminId,
+                            ProfileId = profileId,
+                            DepartmentId = departmentId,
+                            EmployeeId = employeeId,
+                            Designation = request.Designation.Trim(),
+                            CreatedBy = caller.Id,
+                            CreatedAt = DateTime.UtcNow,
+                            UpdatedAt = DateTime.UtcNow
+                        });
+
+                        await _context.SaveChangesAsync();
+
+                        if (departmentId.HasValue)
+                        {
+                            var dept = await _context.Departments.FirstAsync(d => d.Id == departmentId.Value);
+                            dept.AdminId = profileId;
+                            await _context.SaveChangesAsync();
+                        }
+
+                        await tx.CommitAsync();
+                        return Ok(new { message = "Admin created successfully.", id = adminId });
+                    }
+                    catch
+                    {
+                        await tx.RollbackAsync();
+                        throw;
+                    }
                 });
-
-                await _context.SaveChangesAsync();
-
-                if (departmentId.HasValue)
-                {
-                    var dept = await _context.Departments.FirstAsync(d => d.Id == departmentId.Value);
-                    dept.AdminId = profileId;
-                    await _context.SaveChangesAsync();
-                }
-
-                await tx.CommitAsync();
             }
             catch (Exception ex)
             {
+                // Anything thrown inside ExecuteAsync (including after retries are exhausted) lands here
                 try { await adminClient.DeleteUser(profileId.ToString()); }
                 catch (Exception cleanupEx) { Console.WriteLine($"[CREATE ADMIN CLEANUP ERROR]: {cleanupEx.Message}"); }
 
@@ -438,8 +457,6 @@ namespace UniversityPortal.API.Controllers
                 Console.WriteLine($"[CREATE ADMIN ERROR]: {message}");
                 return StatusCode(500, new { message = "Failed to create admin.", details = message });
             }
-
-            return Ok(new { message = "Admin created successfully.", id = adminId });
         }
 
         // ===================== UPDATE =====================
